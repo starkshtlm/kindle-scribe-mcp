@@ -1,0 +1,36 @@
+# Fly.io deployment: public HTTPS with no proxy of your own, and an origin
+# Claude's connector broker reaches directly (no Cloudflare relay needed).
+#
+#   cp deploy/fly.toml.example fly.toml   # edit app name
+#   fly launch --no-deploy --copy-config
+#   fly volume create scribe_data --size 1
+#   cat .env | fly secrets import
+#   fly deploy
+#
+# Your MCP URL becomes: https://<app>.fly.dev/<MCP_TOKEN>/mcp
+
+app = "kindle-scribe-mcp"
+primary_region = "arn"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  INBOX_DIR = "/data/inbox"
+
+[[mounts]]
+  source = "scribe_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8377
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    path = "/healthz"

@@ -1,0 +1,16 @@
+services:
+  scribe-bridge:
+    build: .
+    image: kindle-scribe-mcp:latest
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - scribe-data:/data
+    # Bound to localhost: put a TLS-terminating proxy (Caddy, Cloudflare
+    # Tunnel, your platform's ingress) in front. The MCP endpoint must be
+    # reachable over public HTTPS for Claude to connect.
+    ports:
+      - "127.0.0.1:8377:8377"
+
+volumes:
+  scribe-data:

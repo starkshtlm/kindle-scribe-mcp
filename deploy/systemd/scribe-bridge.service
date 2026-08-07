@@ -1,0 +1,22 @@
+[Unit]
+Description=kindle-scribe-mcp bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=scribe
+Group=scribe
+EnvironmentFile=/etc/scribe-bridge.env
+WorkingDirectory=/opt/scribe-bridge
+ExecStart=/opt/scribe-bridge/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8377
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+# Required: ProtectSystem=strict makes /tmp read-only, and both PDF rendering
+# and page-image extraction need a writable temp directory.
+PrivateTmp=true
+ReadWritePaths=/var/lib/scribe-bridge
+
+[Install]
+WantedBy=multi-user.target

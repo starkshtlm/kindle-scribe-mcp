@@ -1,0 +1,15 @@
+# Copy to wrangler.toml, fill in, then: npx wrangler deploy
+# (wrangler.toml is gitignored because MCP_TOKEN is a credential.)
+
+name = "kindle-scribe-mcp"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+[vars]
+# Public HTTPS base URL of your bridge, no trailing slash.
+ORIGIN = "https://bridge.example.com"
+# Same MCP_TOKEN as in your .env.
+MCP_TOKEN = "your-mcp-token"
+
+[observability]
+enabled = true

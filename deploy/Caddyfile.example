@@ -1,0 +1,9 @@
+# Minimal public HTTPS in front of the bridge. Caddy gets and renews the
+# Let's Encrypt certificate automatically.
+#
+#   sudo cp Caddyfile.example /etc/caddy/Caddyfile   (edit the hostname first)
+#   sudo systemctl reload caddy
+
+bridge.example.com {
+    reverse_proxy 127.0.0.1:8377
+}

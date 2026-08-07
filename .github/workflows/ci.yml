@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t kindle-scribe-mcp:ci .
+
+      - name: Start container
+        run: |
+          docker run -d --name bridge -p 127.0.0.1:8377:8377 \
+            -e RESEND_API_KEY=re_ci_placeholder \
+            -e KINDLE_EMAIL=ci@kindle.com \
+            -e FROM_EMAIL=ci@example.com \
+            -e BRIDGE_TOKEN=citoken \
+            -e MCP_TOKEN=cimcptoken \
+            -e MCP_ALLOWED_HOSTS='*' \
+            kindle-scribe-mcp:ci
+          for i in $(seq 30); do
+            curl -sf http://127.0.0.1:8377/healthz && break || sleep 1
+          done
+
+      - name: Health endpoint reports MCP enabled
+        run: curl -sf http://127.0.0.1:8377/healthz | grep -q '"mcp":true'
+
+      - name: MCP endpoint lists all four tools
+        run: |
+          names=$(curl -sf -X POST http://127.0.0.1:8377/cimcptoken/mcp \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+            | python3 -c 'import sys,json;print(",".join(sorted(t["name"] for t in json.load(sys.stdin)["result"]["tools"])))')
+          echo "tools: $names"
+          test "$names" = "ack_annotated,get_annotated,list_annotated,send_to_scribe"
+
+      - name: Secret path is required
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            http://127.0.0.1:8377/wrong-token/mcp -d '{}')
+          test "$code" = "404"
+
+      - name: PDF toolchain present in image
+        run: |
+          docker exec bridge weasyprint --version
+          docker exec bridge pdftoppm -v
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs bridge

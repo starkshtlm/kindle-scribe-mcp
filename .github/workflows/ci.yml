@@ -36,7 +36,7 @@ jobs:
       - name: Health endpoint reports MCP enabled
         run: curl -sf http://127.0.0.1:8377/healthz | grep -q '"mcp":true'
 
-      - name: MCP endpoint lists all four tools
+      - name: MCP endpoint lists every tool
         run: |
           names=$(curl -sf -X POST http://127.0.0.1:8377/cimcptoken/mcp \
             -H 'Content-Type: application/json' \
@@ -44,7 +44,7 @@ jobs:
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
             | python3 -c 'import sys,json;print(",".join(sorted(t["name"] for t in json.load(sys.stdin)["result"]["tools"])))')
           echo "tools: $names"
-          test "$names" = "ack_annotated,get_annotated,list_annotated,send_to_scribe"
+          test "$names" = "ack_annotated,get_annotated,list_annotated,push_summary,send_to_scribe"
 
       - name: Secret path is required
         run: |

@@ -31,7 +31,7 @@ Setup takes about 30 minutes, most of it waiting for DNS.
 ## Quick start
 
 ```bash
-git clone https://github.com/OWNER/kindle-scribe-mcp
+git clone https://github.com/starkshtlm/kindle-scribe-mcp
 cd kindle-scribe-mcp
 ./setup.sh          # asks for your keys, writes .env, prints the next steps
 docker compose up -d
@@ -69,7 +69,7 @@ Optionally install the plugin for `/scribe-send` and `/scribe-fetch` slash
 commands in Claude Code:
 
 ```bash
-claude plugin marketplace add OWNER/kindle-scribe-mcp
+claude plugin marketplace add starkshtlm/kindle-scribe-mcp
 claude plugin install kindle-scribe@kindle-scribe
 ```
 

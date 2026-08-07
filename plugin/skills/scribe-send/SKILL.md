@@ -52,6 +52,13 @@ steps below when running against the REST endpoint instead.
    pages with the stylus, then **Share → Send by email** to the return
    address, and the bridge picks it up automatically.
 
+## Handwritten notes coming the other way
+
+The user can also **write by hand in a blank notebook on the Scribe** and share
+it to the return address — the bridge accepts it exactly like an annotated
+document. Mention this when they want to sketch something by hand, keep a
+journal, or turn meeting scribbles into text.
+
 ## Important
 
 - Always send a **PDF attachment** — never EPUB or DOCX (you cannot write

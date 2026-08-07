@@ -179,3 +179,35 @@ def test_failed_image_leaves_a_visible_note():
     html = '<img src="https://127.0.0.1/blocked.png">'
     out = asyncio.run(app.inline_remote_images(html))
     assert "could not be fetched" in out and "<img" not in out
+
+
+# --- source pairing ---------------------------------------------------------
+# A returning document is matched to the markdown it was rendered from, so the
+# model sees the original next to the handwriting instead of bare images.
+
+
+def test_sent_document_is_paired_with_its_source():
+    slug = app.remember_source("Draft for pairing", "# Draft\n\nSection one.")
+    assert slug == "draft-for-pairing"
+    found = app.find_source("draft-for-pairing")
+    assert found and "Section one." in found["markdown"]
+    (app.OUTBOX_DIR / f"{slug}.json").unlink(missing_ok=True)
+
+
+def test_truncated_filename_still_matches():
+    """Amazon shortens long filenames in its export subject."""
+    slug = app.remember_source("A rather long document title that amazon shortens", "x")
+    assert app.find_source(slug + "-extra-tail") is not None
+    (app.OUTBOX_DIR / f"{slug}.json").unlink(missing_ok=True)
+
+
+def test_handwritten_note_has_no_source():
+    """A notebook written on the device has nothing to pair with — that is fine."""
+    assert app.find_source("some standalone notebook 4711") is None
+
+
+def test_title_is_taken_from_the_quoted_filename():
+    import re
+    subject = 'Daniel sent a file "meeting-notes" to you from their Kindle'
+    quoted = re.search(r'"([^"]+)"', subject)
+    assert quoted.group(1) == "meeting-notes"

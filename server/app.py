@@ -87,18 +87,56 @@ MAX_REDIRECT_HOPS = 4
 MAX_DOWNLOAD_BYTES = 60 * 1024 * 1024
 REPLAY_WINDOW_SECONDS = 3600
 REPLAY_FILE = INBOX_DIR / ".seen-webhooks.json"
+# Markdown of everything sent out, so a returning document can be paired with
+# the text it was made from instead of coming back as context-free images.
+OUTBOX_DIR = Path(os.environ.get("OUTBOX_DIR", str(INBOX_DIR.parent / "outbox")))
+MAX_SOURCE_CHARS = 40_000
 
 MAX_DOC_BYTES = 45 * 1024 * 1024  # Send to Kindle rejects docs over ~50 MB
 MAX_PAGE_IMAGES = 8  # most pages ever rendered per get_annotated call
 MCP_PAYLOAD_BUDGET = 400_000  # raw bytes; ~533 kB as base64, under claude.ai's cap
 
 INBOX_DIR.mkdir(parents=True, exist_ok=True)
+OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def slugify(text: str) -> str:
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
     text = re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").lower()
     return text[:60] or "document"
+
+
+def remember_source(title: str, markdown: str) -> str:
+    """Keep the text a document was rendered from, keyed by the filename slug
+    Amazon echoes back in its export subject."""
+    slug = slugify(title)
+    with contextlib.suppress(OSError):
+        (OUTBOX_DIR / f"{slug}.json").write_text(
+            json.dumps(
+                {"slug": slug, "title": title, "markdown": markdown,
+                 "sent_at": int(time.time())},
+                ensure_ascii=False,
+            )
+        )
+    return slug
+
+
+def find_source(document_name: str) -> dict | None:
+    """Match a returning document to what we sent. Amazon truncates long
+    filenames, so fall back to a prefix match."""
+    slug = slugify(document_name)
+    exact = OUTBOX_DIR / f"{slug}.json"
+    if exact.exists():
+        with contextlib.suppress(ValueError, OSError):
+            return json.loads(exact.read_text())
+    candidates = [
+        p for p in OUTBOX_DIR.glob("*.json")
+        if p.stem.startswith(slug[:40]) or slug.startswith(p.stem[:40])
+    ]
+    if len(candidates) == 1:
+        with contextlib.suppress(ValueError, OSError):
+            return json.loads(candidates[0].read_text())
+    return None
 
 
 def notify_rejection(reason: str) -> None:
@@ -437,7 +475,8 @@ if MCP_TOKEN:
         body = await inline_remote_images(body)
         meta = f"{date.today().isoformat()} · Sent by Claude via scribe-bridge"
         pdf = render_pdf(title, body, meta)
-        await resend_send_pdf(f"{slugify(title)}.pdf", pdf)
+        slug = remember_source(title, content_markdown)
+        await resend_send_pdf(f"{slug}.pdf", pdf)
         return (
             f"Sent to {KINDLE_EMAIL} ({len(pdf) // 1024} kB). It appears on the "
             "Scribe within a minute (the device needs wifi). Remind the user: "
@@ -463,7 +502,10 @@ if MCP_TOKEN:
     @mcp.tool()
     def get_annotated(item_id: str, start_page: int = 1) -> list:
         """Fetch an annotated document as page images so you can read the user's
-        handwritten comments (transcribe verbatim; struck-through text means
+        handwritten comments. When the document was sent from here, the ORIGINAL
+        TEXT comes with the first reply so you can see exactly what the
+        handwriting changes; with no original it is a standalone handwritten
+        note (transcribe verbatim; struck-through text means
         'delete', margin text with an arrow means 'add/replace here'). Long
         documents arrive in batches because of the payload limit: the reply
         states the page range and the total — if more pages remain, call again
@@ -503,12 +545,55 @@ if MCP_TOKEN:
                 used += len(data)
             end = start + len(images) - 1
             note = f"Pages {start}-{end} of {total}."
+            preamble: list = []
+            if start == 1:
+                meta_path = INBOX_DIR / f"{item_id}.json"
+                meta = {}
+                if meta_path.exists():
+                    with contextlib.suppress(ValueError, OSError):
+                        meta = json.loads(meta_path.read_text())
+                linked = find_source(meta.get("title", "")) if meta else None
+                if linked:
+                    preamble.append(
+                        "THE ORIGINAL TEXT that was sent to the Scribe follows. "
+                        "Compare the page images against it: the handwriting marks "
+                        "changes to this text. Treat the original as fact and the "
+                        "handwriting as instructions about what to change.\n\n"
+                        "--- ORIGINAL ---\n"
+                        + linked["markdown"][:MAX_SOURCE_CHARS]
+                        + "\n--- END OF ORIGINAL ---"
+                    )
+                else:
+                    preamble.append(
+                        "No original is linked — this is most likely a standalone "
+                        "handwritten note from the Scribe. Transcribe it and treat "
+                        "the content as the user's own notes."
+                    )
             if end < total:
                 note += (
                     f" MORE PAGES REMAIN: call get_annotated again with "
                     f"start_page={end + 1} before you summarize."
                 )
-            return [note, *images]
+            return [*preamble, note, *images]
+
+    @mcp.tool()
+    def push_summary(message: str, title: str = "Kindle Scribe") -> str:
+        """Send a short text as a push notification to the user's phone. Use it
+        after interpreting an annotated document so the summary of what they
+        wrote lands on their lock screen without them opening a chat. Keep it
+        under ~300 characters."""
+        if not NTFY_TOPIC:
+            return "No ntfy topic configured; nothing sent."
+        try:
+            httpx.post(
+                f"https://ntfy.sh/{NTFY_TOPIC}",
+                content=message[:900].encode(),
+                headers={"Title": title[:80], "Tags": "pencil2"},
+                timeout=15,
+            )
+        except httpx.HTTPError as exc:
+            return f"Notification failed: {exc}"
+        return "Notification sent."
 
     @mcp.tool()
     def ack_annotated(item_id: str) -> str:
@@ -691,8 +776,13 @@ async def inbound_webhook(request: Request):
         return {"ignored": detail}
 
     subject = email.get("subject") or "document"
-    # Amazon export subjects look like: '"Titel" from your Kindle'
-    title = re.sub(r"\s*from your kindle\s*$", "", subject, flags=re.I).strip('" ')
+    # Amazon quotes the filename in the subject:
+    # 'Daniel sent a file "my-plan" to you from their Kindle'. Using just the
+    # filename reads better in listings and links back to the outbox. A
+    # handwritten notebook arrives the same way, simply with no match.
+    quoted = re.search(r'"([^"]+)"', subject)
+    title = (quoted.group(1) if quoted else subject).strip()
+    source = find_source(title)
 
     links = extract_links(email.get("html", ""), email.get("text", ""))
     pdf, why = None, "no candidate links in the mail"
@@ -715,6 +805,8 @@ async def inbound_webhook(request: Request):
                 "received_at": email.get("created_at"),
                 "size": len(pdf),
                 "processed": False,
+                "source_slug": (source or {}).get("slug"),
+                "kind": "annotated draft" if source else "handwritten note",
             },
             ensure_ascii=False,
         )

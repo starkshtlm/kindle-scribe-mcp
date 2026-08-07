@@ -29,8 +29,16 @@ Use the steps below for the REST endpoint.
      -H "Authorization: Bearer $BRIDGE_TOKEN" -o <id>.pdf
    ```
 
-3. **Interpret with vision.** Read the PDF page by page. The handwriting is
-   embedded exactly where the user wrote it. For every annotated page:
+3. **Interpret with vision.** Read page by page — the handwriting sits exactly
+   where the user wrote it.
+
+   If the reply from `get_annotated` includes the original text, the document
+   was sent from here: compare the pages against it and describe exactly what
+   the handwriting changes. With no original it is a **standalone handwritten
+   note** written in a blank notebook on the device — transcribe it and treat
+   it as the user's own thinking rather than as edits.
+
+   For every annotated page:
    - Transcribe the handwritten text verbatim.
    - Note what it points at: circles, underlines, arrows, strike-throughs,
      margin notes — and which section of the original it concerns (use the

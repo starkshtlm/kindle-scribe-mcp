@@ -85,13 +85,24 @@ claude plugin install kindle-scribe@kindle-scribe
 Set `NTFY_TOPIC` and subscribe in the [ntfy](https://ntfy.sh) app to get a
 phone push the moment an annotated document lands.
 
+**Handwritten notes work too.** Write in a blank notebook on the Scribe and
+share it to the same address — it arrives like any other document, just
+without an original to compare against.
+
+**Hands-free interpretation.** Because documents are paired with the text they
+were made from, a scheduled task can pick up new arrivals, read the
+handwriting and `push_summary` the result to your phone — so the interpretation
+is waiting for you instead of something you have to ask for. See
+[`docs/automation.md`](docs/automation.md).
+
 ## Tools the MCP server exposes
 
 | Tool | Purpose |
 |---|---|
 | `send_to_scribe(title, content_markdown)` | Render a pen-friendly PDF and mail it to the device |
 | `list_annotated(only_new)` | List documents that came back |
-| `get_annotated(item_id, start_page)` | Page images to read the handwriting (paginated) |
+| `get_annotated(item_id, start_page)` | Page images to read the handwriting, paginated — plus the original text when the document was sent from here |
+| `push_summary(message)` | Push a short summary to the user's phone via ntfy |
 | `ack_annotated(item_id)` | Mark one as processed |
 
 The outgoing PDF uses a 3:4 page (matching the Scribe's screen), a wide right

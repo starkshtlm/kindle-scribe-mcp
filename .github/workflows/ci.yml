@@ -11,6 +11,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Security regression tests (inbound trust boundary)
+        run: |
+          python3 -m pip install --quiet pytest httpx fastapi python-multipart mcp markdown
+          python3 -m pytest server/test_security.py -q
+
       - name: Build image
         run: docker build -t kindle-scribe-mcp:ci .
 

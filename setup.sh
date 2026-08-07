@@ -50,12 +50,13 @@ ask WEBHOOK_SECRET   "Resend webhook signing secret (whsec_..., blank to skip)" 
 ask NTFY             "ntfy.sh topic for phone pushes (blank to skip)" " "
 
 FROM_EMAIL="${FROM_LOCAL}@${MAIL_DOMAIN}"
-RETURN_EMAIL="${INBOX_LOCAL}@${MAIL_DOMAIN}"
+RETURN_EMAIL="${INBOX_LOCAL}@${MAIL_DOMAIN}"  # enforced by the bridge
 BRIDGE_TOKEN=$(gen 32)
 MCP_TOKEN=$(gen 24)
 
 cat > .env <<EOF
 RESEND_API_KEY=${RESEND_API_KEY}
+RETURN_EMAIL=${RETURN_EMAIL}
 KINDLE_EMAIL=${KINDLE_EMAIL}
 FROM_EMAIL=${FROM_EMAIL}
 BRIDGE_TOKEN=${BRIDGE_TOKEN}
@@ -63,7 +64,7 @@ MCP_TOKEN=${MCP_TOKEN}
 MCP_ALLOWED_HOSTS=*
 RESEND_WEBHOOK_SECRET=$(echo "$WEBHOOK_SECRET" | xargs)
 NTFY_TOPIC=$(echo "$NTFY" | xargs)
-INBOX_RETENTION_DAYS=0
+INBOX_RETENTION_DAYS=30
 INBOX_DIR=/data/inbox
 EOF
 chmod 600 .env

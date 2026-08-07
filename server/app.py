@@ -14,15 +14,18 @@ import base64
 import contextlib
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import tempfile
 import time
 import unicodedata
 from datetime import date
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
@@ -53,8 +56,31 @@ INBOX_DIR = Path(os.environ.get("INBOX_DIR", "/var/lib/scribe-bridge/inbox"))
 MCP_ALLOWED_HOSTS = [
     h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "*").split(",") if h.strip()
 ]
-INBOX_RETENTION_DAYS = int(os.environ.get("INBOX_RETENTION_DAYS", "0"))
+INBOX_RETENTION_DAYS = int(os.environ.get("INBOX_RETENTION_DAYS", "30"))
 TEMPLATE_PATH = Path(__file__).parent / "template.html"
+
+# --- Inbound trust boundary -------------------------------------------------
+# Resend inbound is catch-all: ANY address at the receiving domain reaches the
+# webhook, and the Svix signature only proves Resend relayed the mail — not
+# that Amazon sent it. Everything below re-establishes that guarantee.
+
+# Only mail addressed here is processed (comma-separated). Required.
+RETURN_EMAILS = {
+    a.strip().lower()
+    for a in os.environ.get("RETURN_EMAIL", "").split(",")
+    if a.strip()
+}
+# Domains Amazon actually sends Kindle exports from, and signs with.
+TRUSTED_SENDER_DOMAINS = ("amazon.com", "kindle.com", "amazonses.com")
+# Hosts the *first* link may point at. The mail body is attacker-controlled
+# until the sender is proven, so this stays tight.
+TRUSTED_LINK_HOST_RE = re.compile(r"(^|\.)amazon\.[a-z]{2,3}(\.[a-z]{2})?$", re.I)
+# Amazon's /gp/f.html forwards to S3, so redirects cannot simply be disabled;
+# later hops are constrained by scheme + publicly-routable IP instead.
+MAX_REDIRECT_HOPS = 4
+MAX_DOWNLOAD_BYTES = 60 * 1024 * 1024
+REPLAY_WINDOW_SECONDS = 600
+REPLAY_FILE = INBOX_DIR / ".seen-webhooks.json"
 
 MAX_DOC_BYTES = 45 * 1024 * 1024  # Send to Kindle rejects docs over ~50 MB
 MAX_PAGE_IMAGES = 8  # most pages ever rendered per get_annotated call
@@ -67,6 +93,119 @@ def slugify(text: str) -> str:
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
     text = re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").lower()
     return text[:60] or "document"
+
+
+def notify_rejection(reason: str) -> None:
+    """Rejections must never fail silently — a false positive has to be visible
+    immediately, not discovered later as a document that never arrived."""
+    print(f"REJECTED inbound mail: {reason}", flush=True)
+    if not NTFY_TOPIC:
+        return
+    try:
+        httpx.post(
+            f"https://ntfy.sh/{NTFY_TOPIC}",
+            content=f"Rejected inbound mail: {reason}".encode(),
+            headers={"Title": "Kindle Scribe", "Tags": "warning"},
+            timeout=15,
+        )
+    except httpx.HTTPError:
+        pass
+
+
+def domain_of(address: str) -> str:
+    match = re.search(r"@([A-Za-z0-9.-]+)", address or "")
+    return match.group(1).lower().rstrip(".") if match else ""
+
+
+def is_trusted_domain(domain: str) -> bool:
+    return any(domain == d or domain.endswith(f".{d}") for d in TRUSTED_SENDER_DOMAINS)
+
+
+def sender_is_authentic(email: dict) -> tuple[bool, str]:
+    """Require a trusted From domain *and* a passing DKIM/SPF result for that
+    domain. A From header on its own is trivially forged."""
+    from_domain = domain_of(str(email.get("from", "")))
+    if not is_trusted_domain(from_domain):
+        return False, f"untrusted sender domain {from_domain or '(missing)'}"
+
+    headers = email.get("headers") or {}
+    lowered = {str(k).lower(): v for k, v in headers.items()}
+
+    dkim_domains = []
+    dkim = lowered.get("dkim-signature")
+    for entry in dkim if isinstance(dkim, list) else [dkim]:
+        if isinstance(entry, dict):
+            dkim_domains.append(str(entry.get("params", {}).get("d", "")).lower())
+        elif isinstance(entry, str):
+            found = re.search(r"[;\s]d=([A-Za-z0-9.-]+)", entry)
+            if found:
+                dkim_domains.append(found.group(1).lower())
+    trusted_dkim = next((d for d in dkim_domains if d and is_trusted_domain(d)), "")
+    if trusted_dkim:
+        return True, f"DKIM d={trusted_dkim}"
+
+    auth = " ".join(
+        str(lowered.get(k, "")) for k in ("authentication-results", "received-spf")
+    ).lower()
+    envelope = domain_of(auth)
+    if "spf=pass" in auth or auth.strip().startswith("pass"):
+        if is_trusted_domain(envelope):
+            return True, f"SPF pass ({envelope})"
+        return False, f"SPF pass but envelope domain {envelope or '(unknown)'}"
+    return False, "neither DKIM nor SPF establishes the sender"
+
+
+def addressed_to_us(email: dict) -> tuple[bool, str]:
+    if not RETURN_EMAILS:
+        return False, "RETURN_EMAIL is not configured"
+    recipients = set()
+    for key in ("to", "received_for", "cc"):
+        value = email.get(key)
+        for item in value if isinstance(value, list) else [value]:
+            if item:
+                recipients.add(str(item).lower())
+    hit = {r for r in recipients if any(a in r for a in RETURN_EMAILS)}
+    if hit:
+        return True, ", ".join(sorted(hit))
+    return False, f"recipients {sorted(recipients) or '(none)'}"
+
+
+def url_is_safe(url: str, first_hop: bool) -> tuple[bool, str]:
+    """Block anything that could reach infrastructure instead of Amazon:
+    non-HTTPS, unexpected hosts, and names resolving into private space."""
+    parts = urlsplit(url)
+    if parts.scheme != "https":
+        return False, f"not HTTPS ({parts.scheme})"
+    host = (parts.hostname or "").lower()
+    if not host:
+        return False, "no hostname"
+    if first_hop and not TRUSTED_LINK_HOST_RE.search(host):
+        return False, f"host not allowed: {host}"
+    try:
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        return False, f"DNS lookup failed for {host}: {exc}"
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if not ip.is_global:
+            return False, f"{host} resolves to non-public address {ip}"
+    return True, host
+
+
+def seen_webhook(msg_id: str) -> bool:
+    """Reject replays of an already-processed Svix delivery."""
+    now = int(time.time())
+    seen = {}
+    if REPLAY_FILE.exists():
+        with contextlib.suppress(ValueError, OSError):
+            seen = json.loads(REPLAY_FILE.read_text())
+    seen = {k: v for k, v in seen.items() if now - int(v) < 86400}
+    if msg_id in seen:
+        return True
+    seen[msg_id] = now
+    with contextlib.suppress(OSError):
+        REPLAY_FILE.write_text(json.dumps(seen))
+    return False
 
 
 def prune_inbox() -> None:
@@ -116,7 +255,8 @@ def render_pdf(title: str, html_body: str, meta: str) -> bytes:
         out = Path(tmp) / "doc.pdf"
         src.write_text(html)
         subprocess.run(
-            ["weasyprint", str(src), str(out)], check=True, capture_output=True
+            ["weasyprint", str(src), str(out)], check=True, capture_output=True,
+            timeout=120
         )
         return out.read_bytes()
 
@@ -214,7 +354,8 @@ if MCP_TOKEN:
         if "/" in item_id or not pdf_path.exists():
             return ["Unknown id. Call list_annotated for valid ids."]
         info = subprocess.run(
-            ["pdfinfo", str(pdf_path)], check=True, capture_output=True, text=True
+            ["pdfinfo", str(pdf_path)], check=True, capture_output=True, text=True,
+            timeout=60
         )
         total = int(re.search(r"^Pages:\s+(\d+)", info.stdout, re.M).group(1))
         start = min(max(1, start_page), total)
@@ -228,6 +369,7 @@ if MCP_TOKEN:
                  "-f", str(start), "-l", str(end_render), str(pdf_path), str(prefix)],
                 check=True,
                 capture_output=True,
+                timeout=180,
             )
             # Pack greedily until the byte budget is hit: claude.ai truncates
             # tool results around ~625 kB of JSON, base64 inflates raw bytes
@@ -351,41 +493,89 @@ def extract_links(html: str, text: str) -> list[str]:
     return out
 
 
-async def download_first_pdf(links: list[str]) -> bytes | None:
-    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-        for link in links:
+async def fetch_pdf_safely(url: str) -> tuple[bytes | None, str]:
+    """Follow Amazon's forwarder to S3 by hand, validating every hop, and
+    stream the body so an oversized response cannot exhaust memory."""
+    async with httpx.AsyncClient(timeout=120, follow_redirects=False) as client:
+        current = url
+        for hop in range(MAX_REDIRECT_HOPS):
+            ok, detail = url_is_safe(current, first_hop=(hop == 0))
+            if not ok:
+                return None, f"hop {hop + 1}: {detail}"
             try:
-                r = await client.get(link)
-            except httpx.HTTPError:
-                continue
-            if r.status_code == 200 and r.content[:5] == b"%PDF-":
-                return r.content
-    return None
+                async with client.stream("GET", current) as response:
+                    if response.is_redirect:
+                        location = response.headers.get("location", "")
+                        if not location:
+                            return None, f"hop {hop + 1}: redirect without target"
+                        current = str(httpx.URL(current).join(location))
+                        continue
+                    if response.status_code != 200:
+                        return None, f"HTTP {response.status_code}"
+                    chunks, size = [], 0
+                    async for chunk in response.aiter_bytes():
+                        chunks.append(chunk)
+                        size += len(chunk)
+                        if size > MAX_DOWNLOAD_BYTES:
+                            return None, "exceeds the size limit"
+                    data = b"".join(chunks)
+                    if data[:5] != b"%PDF-":
+                        return None, "response is not a PDF"
+                    return data, f"{size // 1024} kB"
+            except httpx.HTTPError as exc:
+                return None, f"network error: {exc}"
+        return None, "too many redirects"
 
 
 @app.post("/webhook/inbound")
 async def inbound_webhook(request: Request):
     body = await request.body()
-    if WEBHOOK_SECRET and not verify_svix(WEBHOOK_SECRET, request.headers, body):
+    # Fail closed: without a signing secret we cannot tell Resend from anyone.
+    if not WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="webhook secret not configured")
+    if not verify_svix(WEBHOOK_SECRET, request.headers, body):
         raise HTTPException(status_code=401, detail="bad signature")
+
+    timestamp = request.headers.get("svix-timestamp", "")
+    try:
+        if abs(int(time.time()) - int(timestamp)) > REPLAY_WINDOW_SECONDS:
+            raise HTTPException(status_code=401, detail="stale signature")
+    except ValueError:
+        raise HTTPException(status_code=401, detail="bad timestamp")
+    msg_id = request.headers.get("svix-id", "")
+    if msg_id and seen_webhook(msg_id):
+        return {"ignored": "replay"}
+
     event = json.loads(body)
     if event.get("type") != "email.received":
         return {"ignored": event.get("type")}
     email_id = event["data"].get("email_id") or event["data"].get("id")
     email = await fetch_received_email(email_id)
 
-    sender = str(email.get("from", "")).lower()
-    if "amazon" not in sender and "kindle" not in sender:
-        return {"ignored": f"sender {sender}"}
+    # Resend inbound is catch-all, so verify the mail was addressed to us and
+    # genuinely authenticated as Amazon before touching anything inside it.
+    ok, detail = addressed_to_us(email)
+    if not ok:
+        notify_rejection(detail)
+        return {"ignored": detail}
+    ok, detail = sender_is_authentic(email)
+    if not ok:
+        notify_rejection(f"{detail} (from {email.get('from')})")
+        return {"ignored": detail}
 
-    subject = email.get("subject") or "dokument"
+    subject = email.get("subject") or "document"
     # Amazon export subjects look like: '"Titel" from your Kindle'
     title = re.sub(r"\s*from your kindle\s*$", "", subject, flags=re.I).strip('" ')
 
     links = extract_links(email.get("html", ""), email.get("text", ""))
-    pdf = await download_first_pdf(links)
+    pdf, why = None, "no candidate links in the mail"
+    for link in links:
+        pdf, why = await fetch_pdf_safely(link)
+        if pdf:
+            break
     if pdf is None:
-        raise HTTPException(status_code=422, detail=f"no pdf link found in {subject!r}")
+        notify_rejection(f"could not fetch a PDF ({why})")
+        raise HTTPException(status_code=422, detail=f"no pdf fetched: {why}")
 
     item_id = f"{int(time.time())}-{slugify(title)}"
     (INBOX_DIR / f"{item_id}.pdf").write_bytes(pdf)

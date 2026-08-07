@@ -102,7 +102,8 @@ headings — handwritten references like "see 2.3" then land unambiguously.
 
 All settings are environment variables; see [`.env.example`](.env.example).
 Notable ones: `MCP_ALLOWED_HOSTS` (host allowlist for the MCP transport, `*`
-disables the check), `INBOX_RETENTION_DAYS` (auto-delete stored documents),
+disables the check), `RETURN_EMAIL` (the only address whose mail is processed — required),
+`INBOX_RETENTION_DAYS` (auto-delete stored documents, 30 days by default),
 `RESEND_WEBHOOK_SECRET` (verify webhook signatures — recommended).
 
 ## How it works, and what it cannot do

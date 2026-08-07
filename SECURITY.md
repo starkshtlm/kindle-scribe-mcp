@@ -29,13 +29,20 @@ your inbox). The design assumptions:
    private ranges and cloud metadata endpoints. Downloads stream with a hard
    byte limit.
 
-3. **Outgoing markdown cannot reach the network.** WeasyPrint dereferences
+3. **The renderer never touches the network.** WeasyPrint dereferences
    images, stylesheets and fonts by default and offers no switch to stop it,
    so every external reference is stripped from model-supplied content before
-   rendering — inline `data:` URIs survive, remote URLs do not. Without this,
-   anything reaching `send_to_scribe` (including untrusted text you paste into
-   a chat) could probe localhost or cloud metadata and have the response baked
-   into a PDF and mailed out.
+   rendering. Without this, anything reaching `send_to_scribe` (including
+   untrusted text pasted into a chat) could probe localhost or cloud metadata
+   and have the response baked into a PDF and mailed out.
+
+   Images are still supported: they are fetched *before* rendering, over HTTPS
+   only, to publicly-routable addresses only, size-capped, and only when the
+   response really is an image — then embedded as `data:` URIs. An image that
+   cannot be fetched leaves a visible note rather than vanishing. This means
+   the bridge will fetch public URLs on request (an ordinary capability for
+   any HTML-to-PDF service); what it will not do is reach internal
+   infrastructure, and no fetched content is returned to the caller.
 
 4. **Document content is data, never instructions.** A PDF that reaches your
    inbox may contain text aimed at the model. Treat transcribed content as

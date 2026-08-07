@@ -71,15 +71,21 @@ RETURN_EMAILS = {
     if a.strip()
 }
 # Domains Amazon actually sends Kindle exports from, and signs with.
-TRUSTED_SENDER_DOMAINS = ("amazon.com", "kindle.com", "amazonses.com")
+TRUSTED_SENDER_RE = re.compile(
+    r"(^|\.)(amazon\.[a-z]{2,3}(\.[a-z]{2})?|kindle\.com|amazonses\.com)$", re.I
+)
 # Hosts the *first* link may point at. The mail body is attacker-controlled
 # until the sender is proven, so this stays tight.
-TRUSTED_LINK_HOST_RE = re.compile(r"(^|\.)amazon\.[a-z]{2,3}(\.[a-z]{2})?$", re.I)
+TRUSTED_LINK_HOST_RE = re.compile(
+    r"(^|\.)(amazon\.[a-z]{2,3}(\.[a-z]{2})?|amazonaws\.com|media-amazon\.com"
+    r"|ssl-images-amazon\.com|kindle\.com)$",
+    re.I,
+)
 # Amazon's /gp/f.html forwards to S3, so redirects cannot simply be disabled;
 # later hops are constrained by scheme + publicly-routable IP instead.
 MAX_REDIRECT_HOPS = 4
 MAX_DOWNLOAD_BYTES = 60 * 1024 * 1024
-REPLAY_WINDOW_SECONDS = 600
+REPLAY_WINDOW_SECONDS = 3600
 REPLAY_FILE = INBOX_DIR / ".seen-webhooks.json"
 
 MAX_DOC_BYTES = 45 * 1024 * 1024  # Send to Kindle rejects docs over ~50 MB
@@ -118,7 +124,7 @@ def domain_of(address: str) -> str:
 
 
 def is_trusted_domain(domain: str) -> bool:
-    return any(domain == d or domain.endswith(f".{d}") for d in TRUSTED_SENDER_DOMAINS)
+    return bool(domain) and bool(TRUSTED_SENDER_RE.search(domain))
 
 
 def sender_is_authentic(email: dict) -> tuple[bool, str]:
@@ -167,7 +173,9 @@ def addressed_to_us(email: dict) -> tuple[bool, str]:
     hit = {r for r in recipients if any(a in r for a in RETURN_EMAILS)}
     if hit:
         return True, ", ".join(sorted(hit))
-    return False, f"recipients {sorted(recipients) or '(none)'}"
+    expected = ", ".join(sorted(RETURN_EMAILS))
+    got = ", ".join(sorted(recipients)) or "(none)"
+    return False, f"addressed to {got} — share to {expected} instead"
 
 
 def url_is_safe(url: str, first_hop: bool) -> tuple[bool, str]:
@@ -192,20 +200,27 @@ def url_is_safe(url: str, first_hop: bool) -> tuple[bool, str]:
     return True, host
 
 
-def seen_webhook(msg_id: str) -> bool:
-    """Reject replays of an already-processed Svix delivery."""
+def _load_seen() -> dict:
     now = int(time.time())
     seen = {}
     if REPLAY_FILE.exists():
         with contextlib.suppress(ValueError, OSError):
             seen = json.loads(REPLAY_FILE.read_text())
-    seen = {k: v for k, v in seen.items() if now - int(v) < 86400}
-    if msg_id in seen:
-        return True
-    seen[msg_id] = now
+    return {k: v for k, v in seen.items() if now - int(v) < 86400}
+
+
+def already_processed(msg_id: str) -> bool:
+    """True only for deliveries that completed successfully before."""
+    return msg_id in _load_seen()
+
+
+def mark_processed(msg_id: str) -> None:
+    """Record a delivery only once it has fully succeeded. Recording earlier
+    would turn a retry-after-failure into a silently dropped document."""
+    seen = _load_seen()
+    seen[msg_id] = int(time.time())
     with contextlib.suppress(OSError):
         REPLAY_FILE.write_text(json.dumps(seen))
-    return False
 
 
 def prune_inbox() -> None:
@@ -258,6 +273,77 @@ _IMG_TAG = re.compile(r"<\s*img\b[^>]*>", re.I)
 _EXTERNAL_URL_FUNC = re.compile(r"url\(\s*['\"]?(?!data:)[^)]*\)", re.I)
 _EVENT_ATTR = re.compile(r"\son[a-z]+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", re.I)
 _BACKGROUND_ATTR = re.compile(r"\sbackground\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", re.I)
+
+
+MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024
+
+
+async def inline_remote_images(html: str) -> str:
+    """Fetch images referenced in the document and embed them as data: URIs.
+
+    Sanitising alone would silently drop every illustration, so images are
+    fetched here instead — but only over HTTPS to publicly-routable addresses,
+    size-capped, and only when the response really is an image. Documents keep
+    looking right, the renderer itself stays offline, and the resulting PDF is
+    self-contained on the device.
+    """
+    srcs = {
+        m.group(1)
+        for m in re.finditer(r'<img[^>]+src\s*=\s*["\']([^"\']+)["\']', html, re.I)
+        if not m.group(1).lower().startswith("data:")
+    }
+    if not srcs:
+        return html
+    # Several hosts (Wikimedia among them) reject requests without a
+    # descriptive User-Agent, which would silently drop the illustration.
+    headers = {
+        "User-Agent": "kindle-scribe-bridge/1.0 (+https://github.com/starkshtlm/kindle-scribe-mcp)",
+        "Accept": "image/*,*/*;q=0.8",
+    }
+    async with httpx.AsyncClient(
+        timeout=20, follow_redirects=False, headers=headers
+    ) as client:
+        for src in srcs:
+            current, data, media = src, None, "image/png"
+            for _ in range(3):
+                ok, _detail = url_is_safe(current, first_hop=False)
+                if not ok:
+                    break
+                try:
+                    async with client.stream("GET", current) as response:
+                        if response.is_redirect:
+                            location = response.headers.get("location", "")
+                            if not location:
+                                break
+                            current = str(httpx.URL(current).join(location))
+                            continue
+                        media = response.headers.get("content-type", "").split(";")[0]
+                        if response.status_code != 200 or not media.startswith("image/"):
+                            break
+                        chunks, size = [], 0
+                        async for chunk in response.aiter_bytes():
+                            chunks.append(chunk)
+                            size += len(chunk)
+                            if size > MAX_INLINE_IMAGE_BYTES:
+                                chunks = []
+                                break
+                        data = b"".join(chunks) or None
+                        break
+                except httpx.HTTPError:
+                    break
+            if data:
+                encoded = base64.b64encode(data).decode()
+                html = html.replace(src, f"data:{media};base64,{encoded}")
+            else:
+                # Say so rather than leaving a hole the reader cannot explain.
+                host = urlsplit(src).hostname or src
+                html = re.sub(
+                    r'<img[^>]+src\s*=\s*["\']' + re.escape(src) + r'["\'][^>]*>',
+                    f'<p><em>[image could not be fetched: {host}]</em></p>',
+                    html,
+                    flags=re.I,
+                )
+    return html
 
 
 def sanitize_html_for_pdf(html: str) -> str:
@@ -348,6 +434,7 @@ if MCP_TOKEN:
         body = md_lib.markdown(
             content_markdown, extensions=["tables", "fenced_code", "sane_lists"]
         )
+        body = await inline_remote_images(body)
         meta = f"{date.today().isoformat()} · Sent by Claude via scribe-bridge"
         pdf = render_pdf(title, body, meta)
         await resend_send_pdf(f"{slugify(title)}.pdf", pdf)
@@ -583,7 +670,7 @@ async def inbound_webhook(request: Request):
     except ValueError:
         raise HTTPException(status_code=401, detail="bad timestamp")
     msg_id = request.headers.get("svix-id", "")
-    if msg_id and seen_webhook(msg_id):
+    if msg_id and already_processed(msg_id):
         return {"ignored": "replay"}
 
     event = json.loads(body)
@@ -634,6 +721,8 @@ async def inbound_webhook(request: Request):
     )
     notify(title)
     prune_inbox()
+    if msg_id:
+        mark_processed(msg_id)
     return {"stored": item_id}
 
 

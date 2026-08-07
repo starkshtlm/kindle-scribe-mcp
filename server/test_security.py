@@ -105,10 +105,36 @@ def test_private_address_blocked_even_on_later_hops():
     assert app.url_is_safe("https://localhost/x", first_hop=False)[0] is False
 
 
-def test_replay_detection():
+def test_replay_is_only_recorded_after_success():
+    """A retry after a failed delivery must still be processed — recording the
+    id too early would silently drop the document."""
     app.REPLAY_FILE.unlink(missing_ok=True)  # state persists across runs by design
-    assert app.seen_webhook("msg_unique_1") is False
-    assert app.seen_webhook("msg_unique_1") is True
+    assert app.already_processed("msg_unique_1") is False
+    assert app.already_processed("msg_unique_1") is False  # retry, not yet done
+    app.mark_processed("msg_unique_1")
+    assert app.already_processed("msg_unique_1") is True
+
+
+@pytest.mark.parametrize(
+    "domain", ["amazon.com", "amazon.co.uk", "amazon.de", "bounces.amazon.com"]
+)
+def test_regional_amazon_domains_are_trusted(domain):
+    """Storefronts differ by country; DKIM/SPF still has to prove the domain."""
+    assert app.is_trusted_domain(domain) is True
+
+
+@pytest.mark.parametrize("host", [
+    "kindle-content-requests-prod.s3.amazonaws.com",
+    "www.amazon.co.uk",
+])
+def test_amazon_owned_hosts_allowed_on_first_hop(host):
+    assert app.url_is_safe(f"https://{host}/x", first_hop=True)[0] is True
+
+
+def test_rejection_message_says_what_to_do():
+    mail = {"to": ["typo@scribe.example.com"], "received_for": []}
+    ok, detail = app.addressed_to_us(mail)
+    assert ok is False and "inbox@scribe.example.com" in detail
 
 
 # --- outbound rendering -----------------------------------------------------
@@ -144,3 +170,12 @@ def test_ordinary_content_is_untouched():
     html = "<p>Plain <b>text</b> and a <a href=\"https://example.com\">link</a></p>"
     out = app.sanitize_html_for_pdf(html)
     assert "<b>text</b>" in out and "example.com" in out  # anchors are not fetched
+
+
+def test_failed_image_leaves_a_visible_note():
+    """A dropped illustration must be explained, not silently vanish."""
+    import asyncio
+
+    html = '<img src="https://127.0.0.1/blocked.png">'
+    out = asyncio.run(app.inline_remote_images(html))
+    assert "could not be fetched" in out and "<img" not in out

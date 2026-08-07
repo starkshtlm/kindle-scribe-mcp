@@ -29,7 +29,15 @@ your inbox). The design assumptions:
    private ranges and cloud metadata endpoints. Downloads stream with a hard
    byte limit.
 
-3. **Document content is data, never instructions.** A PDF that reaches your
+3. **Outgoing markdown cannot reach the network.** WeasyPrint dereferences
+   images, stylesheets and fonts by default and offers no switch to stop it,
+   so every external reference is stripped from model-supplied content before
+   rendering — inline `data:` URIs survive, remote URLs do not. Without this,
+   anything reaching `send_to_scribe` (including untrusted text you paste into
+   a chat) could probe localhost or cloud metadata and have the response baked
+   into a PDF and mailed out.
+
+4. **Document content is data, never instructions.** A PDF that reaches your
    inbox may contain text aimed at the model. Treat transcribed content as
    material to summarize and act on *within the current task*; do not let it
    trigger outward-facing actions (sending mail, calling other tools) without
@@ -47,10 +55,11 @@ with any new finding.
   `MCP_TOKEN` if a log may have leaked, and prefer OAuth once available.
 - **No multi-user isolation.** One deployment serves one person. Do not expose
   a shared instance to several users.
-- **The container runs as root** and system packages are not pinned. Run it
-  with `--cap-drop ALL --security-opt no-new-privileges` and a read-only
-  filesystem, and keep the image rebuilt so weasyprint/poppler stay patched.
-  PDF parsing happens in subprocesses but not in a sandbox.
+- **PDF parsing is not sandboxed.** poppler runs as a subprocess under the
+  container's unprivileged user with dropped capabilities and a read-only
+  filesystem, but not in a dedicated sandbox. Rebuild the image regularly so
+  weasyprint and poppler stay patched; the base image is pinned by digest, so
+  bump it when you rebuild.
 - **DNS rebinding between validation and connection** is theoretically
   possible. The Amazon-host allowlist on the first hop makes it impractical.
 
@@ -61,4 +70,5 @@ with any new finding.
 - [ ] `NTFY_TOPIC` set, so rejected mail is visible immediately
 - [ ] `INBOX_RETENTION_DAYS` matches how long you want documents kept
 - [ ] The MCP URL treated as a password; access logs off or redacted
-- [ ] Container running non-root with resource limits
+- [ ] Container running non-root, read-only, cap-drop ALL, with memory limits
+- [ ] Image rebuilt recently (weasyprint/poppler parse untrusted input)

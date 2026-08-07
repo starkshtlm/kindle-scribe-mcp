@@ -106,5 +106,41 @@ def test_private_address_blocked_even_on_later_hops():
 
 
 def test_replay_detection():
+    app.REPLAY_FILE.unlink(missing_ok=True)  # state persists across runs by design
     assert app.seen_webhook("msg_unique_1") is False
     assert app.seen_webhook("msg_unique_1") is True
+
+
+# --- outbound rendering -----------------------------------------------------
+# WeasyPrint dereferences external resources and has no flag to disable it, so
+# markdown reaching send_to_scribe would otherwise be an SSRF primitive.
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        '<img src="http://169.254.169.254/latest/meta-data/">',
+        '<img src="https://evil.test/pixel.png">',
+        '<link rel="stylesheet" href="http://127.0.0.1:8377/x">',
+        '<div style="background:url(http://evil.test/a.png)">x</div>',
+        "<script>fetch('http://evil.test')</script>",
+        '<iframe src="http://127.0.0.1/"></iframe>',
+        '<object data="http://evil.test/x"></object>',
+        '<body background="http://evil.test/bg.png">',
+    ],
+)
+def test_external_references_are_stripped(html):
+    out = app.sanitize_html_for_pdf(html)
+    assert "http://" not in out and "https://" not in out
+    assert "<script" not in out.lower()
+
+
+def test_inline_data_uris_survive():
+    html = '<img src="data:image/png;base64,AAAA">'
+    assert "data:image/png" in app.sanitize_html_for_pdf(html)
+
+
+def test_ordinary_content_is_untouched():
+    html = "<p>Plain <b>text</b> and a <a href=\"https://example.com\">link</a></p>"
+    out = app.sanitize_html_for_pdf(html)
+    assert "<b>text</b>" in out and "example.com" in out  # anchors are not fetched

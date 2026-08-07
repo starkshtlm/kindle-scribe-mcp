@@ -243,12 +243,44 @@ async def resend_send_pdf(filename: str, data: bytes) -> str:
     return r.json().get("id", "")
 
 
+# WeasyPrint fetches external resources (images, stylesheets, fonts) by
+# default and has no flag to disable it, so anything that could trigger a
+# fetch is removed from model-supplied content before rendering. Without this,
+# markdown reaching send_to_scribe is an SSRF primitive against localhost,
+# private ranges and cloud metadata — and the response would be baked into a
+# PDF and mailed out.
+_DROP_WITH_CONTENT = re.compile(
+    r"<(script|style|iframe|object|embed|svg|math)\b.*?</\1\s*>",
+    re.I | re.S,
+)
+_DROP_TAGS = re.compile(r"<\s*(script|style|iframe|object|embed|link|base|svg|math)\b[^>]*>", re.I)
+_IMG_TAG = re.compile(r"<\s*img\b[^>]*>", re.I)
+_EXTERNAL_URL_FUNC = re.compile(r"url\(\s*['\"]?(?!data:)[^)]*\)", re.I)
+_EVENT_ATTR = re.compile(r"\son[a-z]+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", re.I)
+_BACKGROUND_ATTR = re.compile(r"\sbackground\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", re.I)
+
+
+def sanitize_html_for_pdf(html: str) -> str:
+    """Strip everything WeasyPrint could dereference over the network.
+    Inline data: images survive; remote references do not."""
+    html = _DROP_WITH_CONTENT.sub("", html)
+    html = _DROP_TAGS.sub("", html)
+    html = _IMG_TAG.sub(
+        lambda m: m.group(0) if re.search(r'src\s*=\s*["\']?data:', m.group(0), re.I) else "",
+        html,
+    )
+    html = _EXTERNAL_URL_FUNC.sub("none", html)
+    html = _EVENT_ATTR.sub("", html)
+    html = _BACKGROUND_ATTR.sub("", html)
+    return html
+
+
 def render_pdf(title: str, html_body: str, meta: str) -> bytes:
     html = (
         TEMPLATE_PATH.read_text()
         .replace("{{TITLE}}", title)
         .replace("{{META}}", meta)
-        .replace("{{BODY}}", html_body)
+        .replace("{{BODY}}", sanitize_html_for_pdf(html_body))
     )
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "doc.html"
@@ -438,7 +470,15 @@ async def send_to_kindle(
     file: UploadFile = File(...), authorization: str | None = Header(None)
 ):
     require_token(authorization)
-    data = await file.read()
+    # Read in chunks so an oversized upload cannot exhaust memory before the
+    # size check runs.
+    chunks, size = [], 0
+    while chunk := await file.read(1 << 20):
+        size += len(chunk)
+        if size > MAX_DOC_BYTES:
+            raise HTTPException(status_code=413, detail="document too large")
+        chunks.append(chunk)
+    data = b"".join(chunks)
     filename = file.filename or "dokument.pdf"
     try:
         resend_id = await resend_send_pdf(filename, data)

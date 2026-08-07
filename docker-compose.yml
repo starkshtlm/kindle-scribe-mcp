@@ -11,6 +11,20 @@ services:
     # reachable over public HTTPS for Claude to connect.
     ports:
       - "127.0.0.1:8377:8377"
+    # This container parses PDFs and HTML from outside your control. Give a
+    # parser bug as little to work with as possible.
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          pids: 256
 
 volumes:
   scribe-data:

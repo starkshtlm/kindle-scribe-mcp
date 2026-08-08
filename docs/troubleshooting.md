@@ -30,9 +30,17 @@ the mail path is the only one that works.
    so nothing is lost while you fix it.
 3. Check the MX record is on the right (sub)domain and has the lowest priority.
 
+**Webhook returns 503.**
+`RESEND_WEBHOOK_SECRET` is empty. The webhook fails closed rather than accept
+unsigned requests, so every delivery is refused and nothing reaches the inbox.
+Register the webhook in Resend, paste its signing secret into `.env`, restart.
+Resend keeps inbound mail for 30 days, so the documents are still there.
+
 **Webhook returns 401.**
 `RESEND_WEBHOOK_SECRET` does not match the signing secret shown on the webhook's
-page in Resend. Copy it again and restart.
+page in Resend. Copy it again and restart. If it *did* work until recently,
+check the server clock: deliveries more than an hour out of step are rejected
+as stale, and a suspended VM comes back with a drifted clock.
 
 ## MCP / connector
 
@@ -47,7 +55,9 @@ side is wrong. Fixes, in order of preference:
 1. Host where the broker can reach you — Fly.io works (see
    `deploy/fly.toml.example`).
 2. Front your origin with the Cloudflare Worker in `worker/` — a `workers.dev`
-   URL gets through. This is what the reference deployment does.
+   URL gets through. This is what the reference deployment does. The worker
+   relays `/webhook/inbound` as well, so the same hostname works for the Resend
+   webhook and you do not need a second public route.
 
 **"Invalid Host header" from the MCP endpoint.**
 The MCP SDK's DNS-rebinding guard rejects Host headers it does not know. Set

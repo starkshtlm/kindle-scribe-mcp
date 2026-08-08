@@ -59,6 +59,33 @@ MCP_ALLOWED_HOSTS = [
 INBOX_RETENTION_DAYS = int(os.environ.get("INBOX_RETENTION_DAYS", "30"))
 TEMPLATE_PATH = Path(__file__).parent / "template.html"
 
+
+def warn_if_inbound_is_dead() -> list[str]:
+    """Both of these leave sending fully working while receiving silently
+    rejects everything, which is indistinguishable from "Amazon is slow" until
+    someone reads the logs days later. Say it at startup instead.
+
+    Deliberately a warning and not SystemExit: an existing deployment that is
+    happily sending should not turn into a restart loop on upgrade.
+    """
+    problems = []
+    if not os.environ.get("RETURN_EMAIL", "").strip():
+        problems.append(
+            "RETURN_EMAIL is not set — every incoming document will be rejected. "
+            "Set it to the address you share to from the Scribe."
+        )
+    if not os.environ.get("RESEND_WEBHOOK_SECRET", "").strip():
+        problems.append(
+            "RESEND_WEBHOOK_SECRET is not set — the webhook answers 503 and no "
+            "document can arrive. Register the webhook in Resend and paste its "
+            "signing secret here."
+        )
+    return problems
+
+
+for _problem in warn_if_inbound_is_dead():
+    print(f"WARNING: {_problem}", flush=True)
+
 # --- Inbound trust boundary -------------------------------------------------
 # Resend inbound is catch-all: ANY address at the receiving domain reaches the
 # webhook, and the Svix signature only proves Resend relayed the mail — not

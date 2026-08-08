@@ -17,12 +17,31 @@ ask() { # ask VAR "prompt" ["default"]
   printf -v "$__var" '%s' "$__input"
 }
 
+# Check the tools before anything is asked or written. These used to be
+# discovered on the line that generates the tokens, i.e. after seven answered
+# questions, and `set -e` then killed the script without writing anything.
+missing=()
+command -v openssl >/dev/null 2>&1 || missing+=("openssl — usually preinstalled; on Debian/Ubuntu: apt install openssl")
+command -v docker  >/dev/null 2>&1 || missing+=("docker — https://docs.docker.com/get-docker/")
+if [ ${#missing[@]} -gt 0 ]; then
+  bold "Missing tools:"
+  printf '  - %s\n' "${missing[@]}"
+  echo
+  echo "Install them and run ./setup.sh again."
+  exit 1
+fi
+docker compose version >/dev/null 2>&1 || {
+  bold "Docker is installed but 'docker compose' is not available."
+  echo "Install the Compose plugin: https://docs.docker.com/compose/install/"
+  exit 1
+}
+
+gen() { openssl rand -hex "$1"; }
+
 if [ -f .env ]; then
   read -r -p ".env already exists. Overwrite? [y/N]: " ans
   [[ ${ans:-n} =~ ^[Yy]$ ]] || { echo "Keeping existing .env."; exit 0; }
 fi
-
-gen() { openssl rand -hex "$1"; }
 
 bold "kindle-scribe-mcp setup"
 cat <<'EOF'
@@ -46,8 +65,10 @@ ask KINDLE_EMAIL     "Your Kindle address (...@kindle.com)"
 ask MAIL_DOMAIN      "Your Resend domain (e.g. scribe.yourdomain.com)"
 ask FROM_LOCAL       "Sender local-part" "claude"
 ask INBOX_LOCAL      "Return-address local-part" "inbox"
-ask WEBHOOK_SECRET   "Resend webhook signing secret (whsec_..., blank to skip)" " "
 ask NTFY             "ntfy.sh topic for phone pushes (blank to skip)" " "
+# The webhook signing secret is deliberately not asked for here: it does not
+# exist until the service is running on a public URL and the webhook has been
+# registered in Resend. Step 3 below fills it in.
 
 FROM_EMAIL="${FROM_LOCAL}@${MAIL_DOMAIN}"
 RETURN_EMAIL="${INBOX_LOCAL}@${MAIL_DOMAIN}"  # enforced by the bridge
@@ -62,15 +83,29 @@ FROM_EMAIL=${FROM_EMAIL}
 BRIDGE_TOKEN=${BRIDGE_TOKEN}
 MCP_TOKEN=${MCP_TOKEN}
 MCP_ALLOWED_HOSTS=*
-RESEND_WEBHOOK_SECRET=$(echo "$WEBHOOK_SECRET" | xargs)
+RESEND_WEBHOOK_SECRET=
 NTFY_TOPIC=$(echo "$NTFY" | xargs)
 INBOX_RETENTION_DAYS=30
 INBOX_DIR=/data/inbox
 EOF
 chmod 600 .env
 
+# The plugin skills read this file for the REST endpoint. Without it they have
+# no bridge to talk to. BRIDGE_URL points at the local port; change it if you
+# reach the bridge on a public hostname instead.
+BRIDGE_ENV="$HOME/.scribe-bridge.env"
+if [ -f "$BRIDGE_ENV" ]; then
+  echo "Keeping existing $BRIDGE_ENV"
+else
+  cat > "$BRIDGE_ENV" <<EOF
+BRIDGE_URL=http://127.0.0.1:8377
+BRIDGE_TOKEN=${BRIDGE_TOKEN}
+EOF
+  chmod 600 "$BRIDGE_ENV"
+fi
+
 echo
-bold "Wrote .env"
+bold "Wrote .env and $BRIDGE_ENV"
 echo
 bold "Do these three things now:"
 cat <<EOF
@@ -89,6 +124,11 @@ cat <<EOF
      Event: email.received
    Put the signing secret it shows into RESEND_WEBHOOK_SECRET in .env and
    restart (docker compose up -d).
+
+   This step is NOT optional. Until RESEND_WEBHOOK_SECRET is set the bridge
+   answers 503 to every delivery and nothing you share from the Scribe will
+   arrive. Resend keeps inbound mail for 30 days, so nothing is lost while you
+   finish this.
 
 Then add the connector in Claude with this URL:
      https://<your-public-host>/${MCP_TOKEN}/mcp

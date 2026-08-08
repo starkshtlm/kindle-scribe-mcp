@@ -233,3 +233,54 @@ def test_malformed_metadata_is_skipped_not_listed():
         assert "trunc" not in str(app.list_inbox_items(only_new=False))
     finally:
         junk.unlink(missing_ok=True)
+
+
+def test_missing_return_email_is_reported_at_startup(monkeypatch):
+    """Sending keeps working while receiving rejects everything, so this is
+    invisible until someone reads the logs days later."""
+    monkeypatch.delenv("RETURN_EMAIL", raising=False)
+    problems = app.warn_if_inbound_is_dead()
+    assert any("RETURN_EMAIL" in p for p in problems)
+
+
+def test_missing_webhook_secret_is_reported_at_startup(monkeypatch):
+    monkeypatch.setenv("RESEND_WEBHOOK_SECRET", "")
+    problems = app.warn_if_inbound_is_dead()
+    assert any("503" in p for p in problems)
+
+
+def test_configured_inbound_warns_about_nothing(monkeypatch):
+    monkeypatch.setenv("RETURN_EMAIL", "inbox@scribe.example.com")
+    monkeypatch.setenv("RESEND_WEBHOOK_SECRET", "whsec_example")
+    assert app.warn_if_inbound_is_dead() == []
+
+
+def _env_example() -> dict:
+    from pathlib import Path
+    root = Path(app.__file__).resolve().parent.parent
+    values = {}
+    for line in (root / ".env.example").read_text().splitlines():
+        if line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip()
+    return values
+
+
+def test_env_example_agrees_with_the_code_default():
+    """.env.example claimed 0 while the code, setup.sh and the README all said
+    30. Whichever value changes, this fails until both move together."""
+    import re as _re
+    from pathlib import Path
+    source = (Path(app.__file__).resolve().parent / "app.py").read_text()
+    code_default = _re.search(r'"INBOX_RETENTION_DAYS", "(\d+)"', source).group(1)
+    assert _env_example()["INBOX_RETENTION_DAYS"] == code_default
+
+
+def test_webhook_secret_is_documented_as_required():
+    """It was listed under Optional as 'strongly recommended' while the code
+    fails closed without it — the single most misleading line in the repo."""
+    from pathlib import Path
+    text = (Path(app.__file__).resolve().parent.parent / ".env.example").read_text()
+    assert "RESEND_WEBHOOK_SECRET" in _env_example()
+    assert text.index("RESEND_WEBHOOK_SECRET") < text.index("--- Optional ---")

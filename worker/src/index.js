@@ -5,8 +5,13 @@
 // Code and your access logs show zero inbound requests — see docs/troubleshooting.md).
 // Fronting the origin with a workers.dev URL fixes it.
 //
-// Only the tokened MCP path and /healthz pass through; everything else is
-// rejected without touching the origin.
+// Only the tokened MCP path, /healthz and the Resend inbound webhook pass
+// through; everything else is rejected without touching the origin.
+//
+// The webhook is relayed too so a single hostname covers the whole bridge.
+// That adds no exposure: the origin verifies the Svix signature itself and
+// fails closed when no signing secret is configured, so an unsigned request
+// reaching it is rejected there.
 
 export default {
   async fetch(request, env) {
@@ -19,6 +24,7 @@ export default {
     const mcpPath = `/${env.MCP_TOKEN}/mcp`;
     const allowed =
       url.pathname === "/healthz" ||
+      url.pathname === "/webhook/inbound" ||
       url.pathname === mcpPath ||
       url.pathname.startsWith(`${mcpPath}/`);
     if (!allowed) {

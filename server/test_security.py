@@ -211,3 +211,25 @@ def test_title_is_taken_from_the_quoted_filename():
     subject = 'Daniel sent a file "meeting-notes" to you from their Kindle'
     quoted = re.search(r'"([^"]+)"', subject)
     assert quoted.group(1) == "meeting-notes"
+
+
+def test_replay_state_is_not_listed_as_a_document():
+    """Path.glob("*.json") matches dotfiles, so state kept inside the inbox
+    used to come back from list_annotated as a phantom document whose id
+    nothing could open — and, lacking "processed", it looked permanently new."""
+    app.mark_processed("msg_phantom_check")
+    assert app.REPLAY_FILE.parent != app.INBOX_DIR
+    ids = [i.get("id") for i in app.list_inbox_items(only_new=False)]
+    assert "msg_phantom_check" not in ids
+    assert all(i is not None for i in ids)
+
+
+def test_malformed_metadata_is_skipped_not_listed():
+    """A half-written file must not become an unopenable listing entry."""
+    junk = app.INBOX_DIR / "halfwritten.json"
+    junk.write_text('{"id": "trunc')
+    try:
+        assert app.list_inbox_items(only_new=False) is not None
+        assert "trunc" not in str(app.list_inbox_items(only_new=False))
+    finally:
+        junk.unlink(missing_ok=True)

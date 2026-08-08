@@ -86,7 +86,10 @@ TRUSTED_LINK_HOST_RE = re.compile(
 MAX_REDIRECT_HOPS = 4
 MAX_DOWNLOAD_BYTES = 60 * 1024 * 1024
 REPLAY_WINDOW_SECONDS = 3600
-REPLAY_FILE = INBOX_DIR / ".seen-webhooks.json"
+# Kept beside the inbox, never inside it: Path.glob("*.json") matches dotfiles
+# (unlike glob.glob), so state stored here would be listed as a document.
+REPLAY_FILE = INBOX_DIR.parent / ".seen-webhooks.json"
+LEGACY_REPLAY_FILE = INBOX_DIR / ".seen-webhooks.json"
 # Markdown of everything sent out, so a returning document can be paired with
 # the text it was made from instead of coming back as context-free images.
 OUTBOX_DIR = Path(os.environ.get("OUTBOX_DIR", str(INBOX_DIR.parent / "outbox")))
@@ -98,6 +101,14 @@ MCP_PAYLOAD_BUDGET = 400_000  # raw bytes; ~533 kB as base64, under claude.ai's 
 
 INBOX_DIR.mkdir(parents=True, exist_ok=True)
 OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
+
+# Carry replay state over from the old in-inbox location so an upgrade cannot
+# reopen the replay window for deliveries already seen.
+if LEGACY_REPLAY_FILE.exists() and not REPLAY_FILE.exists():
+    with contextlib.suppress(OSError):
+        LEGACY_REPLAY_FILE.replace(REPLAY_FILE)
+with contextlib.suppress(OSError):
+    LEGACY_REPLAY_FILE.unlink(missing_ok=True)
 
 
 def slugify(text: str) -> str:
@@ -418,9 +429,19 @@ def render_pdf(title: str, html_body: str, meta: str) -> bytes:
 
 
 def list_inbox_items(only_new: bool = False) -> list[dict]:
-    items = [
-        json.loads(p.read_text()) for p in sorted(INBOX_DIR.glob("*.json"), reverse=True)
-    ]
+    """Only well-formed document metadata is listed. Anything else in the
+    directory -- hidden state, a half-written file -- is skipped rather than
+    surfaced as a phantom document with an id nothing can open."""
+    items = []
+    for p in sorted(INBOX_DIR.glob("*.json"), reverse=True):
+        if p.name.startswith("."):
+            continue
+        try:
+            meta = json.loads(p.read_text())
+        except (ValueError, OSError):
+            continue
+        if isinstance(meta, dict) and meta.get("id"):
+            items.append(meta)
     if only_new:
         items = [i for i in items if not i.get("processed")]
     return items

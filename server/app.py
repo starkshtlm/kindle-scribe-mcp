@@ -27,6 +27,8 @@ import time
 import unicodedata
 from datetime import date
 from email.message import EmailMessage
+from email.utils import parseaddr
+from html import escape as html_escape
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -173,6 +175,16 @@ with contextlib.suppress(OSError):
     LEGACY_REPLAY_FILE.unlink(missing_ok=True)
 
 
+# Exactly what store_document mints: a unix timestamp, a dash, and a slug.
+# Checking the shape beats blocking "/", which misses the Windows separator —
+# and the server is meant to run locally, on Windows too.
+ITEM_ID_RE = re.compile(r"[0-9]{10,}-[a-z0-9-]{1,60}")
+
+
+def valid_item_id(item_id: str) -> bool:
+    return bool(ITEM_ID_RE.fullmatch(item_id or ""))
+
+
 def slugify(text: str) -> str:
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
     text = re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").lower()
@@ -230,26 +242,75 @@ def notify_rejection(reason: str) -> None:
 
 
 def domain_of(address: str) -> str:
-    match = re.search(r"@([A-Za-z0-9.-]+)", address or "")
-    return match.group(1).lower().rstrip(".") if match else ""
+    """The domain of a single address. parseaddr is what stops a display name
+    from passing itself off as the address: in
+    `"kindle@amazon.com" <evil@attacker.test>` the sender is attacker.test."""
+    _, addr = parseaddr(address or "")
+    return addr.rpartition("@")[2].strip().lower().rstrip(".")
 
 
 def is_trusted_domain(domain: str) -> bool:
     return bool(domain) and bool(TRUSTED_SENDER_RE.search(domain))
 
 
+# Only the labelled fields of an Authentication-Results header count. The free
+# text around them ("domain of amazon.com designates ...") is written by
+# whoever sent the mail, so matching on that would trust the attacker's prose.
+DKIM_PASS_RE = re.compile(
+    r"dkim\s*=\s*pass[^;]*?header\.(?:d|i|from)\s*=\s*<?(?:[^@\s;<>]*@)?"
+    r"([A-Za-z0-9.-]+)",
+    re.I,
+)
+SPF_PASS_RE = re.compile(
+    r"spf\s*=\s*pass[^;]*?(?:smtp\.mailfrom|envelope-from)\s*=\s*<?(?:[^@\s;<>]*@)?"
+    r"([A-Za-z0-9.-]+)",
+    re.I,
+)
+ENVELOPE_RE = re.compile(
+    r"(?:smtp\.mailfrom|envelope-from)\s*=\s*<?(?:[^@\s;<>]*@)?([A-Za-z0-9.-]+)", re.I
+)
+
+
+def _topmost(value: object) -> str:
+    """The first copy of a repeated header. Receiving servers prepend theirs,
+    so the first Authentication-Results is the one our own provider wrote —
+    any others travelled with the message and prove nothing."""
+    if isinstance(value, list):
+        value = value[0] if value else ""
+    if isinstance(value, dict):
+        value = value.get("value", "")
+    return str(value or "")
+
+
+def verified_domains(headers: dict) -> list[str]:
+    """Domains a receiving mail server said it verified for this message."""
+    auth = _topmost(headers.get("authentication-results"))
+    found = DKIM_PASS_RE.findall(auth) + SPF_PASS_RE.findall(auth)
+    spf = _topmost(headers.get("received-spf"))
+    if spf.strip().lower().startswith("pass"):
+        found += ENVELOPE_RE.findall(spf)
+    return [d.strip().rstrip(".").lower() for d in found]
+
+
 def sender_is_authentic(email: dict) -> tuple[bool, str]:
-    """Require a trusted From domain *and* a passing DKIM/SPF result for that
-    domain. A From header on its own is trivially forged."""
+    """Require a trusted From domain *and* a verification result for it from a
+    server we trust. A From header on its own is trivially forged — and so is
+    a DKIM-Signature header, which carries no proof by itself; it is consulted
+    only as a fallback for Resend, whose MX accepted the message upstream. The
+    mailbox transport strips it, because over IMAP the whole message including
+    that header is written by whoever mailed the user."""
     from_domain = domain_of(str(email.get("from", "")))
     if not is_trusted_domain(from_domain):
         return False, f"untrusted sender domain {from_domain or '(missing)'}"
 
-    headers = email.get("headers") or {}
-    lowered = {str(k).lower(): v for k, v in headers.items()}
+    headers = {str(k).lower(): v for k, v in (email.get("headers") or {}).items()}
+
+    for domain in verified_domains(headers):
+        if is_trusted_domain(domain):
+            return True, f"verified sender {domain}"
 
     dkim_domains = []
-    dkim = lowered.get("dkim-signature")
+    dkim = headers.get("dkim-signature")
     for entry in dkim if isinstance(dkim, list) else [dkim]:
         if isinstance(entry, dict):
             dkim_domains.append(str(entry.get("params", {}).get("d", "")).lower())
@@ -260,16 +321,7 @@ def sender_is_authentic(email: dict) -> tuple[bool, str]:
     trusted_dkim = next((d for d in dkim_domains if d and is_trusted_domain(d)), "")
     if trusted_dkim:
         return True, f"DKIM d={trusted_dkim}"
-
-    auth = " ".join(
-        str(lowered.get(k, "")) for k in ("authentication-results", "received-spf")
-    ).lower()
-    envelope = domain_of(auth)
-    if "spf=pass" in auth or auth.strip().startswith("pass"):
-        if is_trusted_domain(envelope):
-            return True, f"SPF pass ({envelope})"
-        return False, f"SPF pass but envelope domain {envelope or '(unknown)'}"
-    return False, "neither DKIM nor SPF establishes the sender"
+    return False, "no receiving server verified this sender"
 
 
 def addressed_to_us(email: dict) -> tuple[bool, str]:
@@ -500,13 +552,23 @@ def sanitize_html_for_pdf(html: str) -> str:
     return html
 
 
-def render_pdf(title: str, html_body: str, meta: str) -> bytes:
-    html = (
+def document_html(title: str, html_body: str, meta: str) -> str:
+    """Fill the template. Kept separate from rendering so the escaping below
+    can be tested without invoking the PDF engine."""
+    return (
         TEMPLATE_PATH.read_text()
-        .replace("{{TITLE}}", title)
+        # The title is model-supplied and lands in <title> and <h1>, so it has
+        # to be escaped: sanitize_html_for_pdf only ever saw the body, and a
+        # title of `<img src="http://169.254.169.254/...">` went straight past
+        # it into the renderer.
+        .replace("{{TITLE}}", html_escape(title))
         .replace("{{META}}", meta)
         .replace("{{BODY}}", sanitize_html_for_pdf(html_body))
     )
+
+
+def render_pdf(title: str, html_body: str, meta: str) -> bytes:
+    html = document_html(title, html_body, meta)
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "doc.html"
         out = Path(tmp) / "doc.pdf"
@@ -623,7 +685,7 @@ if MCP_TOKEN:
         with the start_page it gives you until you have read EVERY page. Then
         acknowledge with ack_annotated."""
         pdf_path = INBOX_DIR / f"{item_id}.pdf"
-        if "/" in item_id or not pdf_path.exists():
+        if not valid_item_id(item_id) or not pdf_path.exists():
             return ["Unknown id. Call list_annotated for valid ids."]
         info = subprocess.run(
             ["pdfinfo", str(pdf_path)], check=True, capture_output=True, text=True,
@@ -711,7 +773,7 @@ if MCP_TOKEN:
         """Mark an annotated document as fully processed so it stops being
         listed as new."""
         meta_path = INBOX_DIR / f"{item_id}.json"
-        if "/" in item_id or not meta_path.exists():
+        if not valid_item_id(item_id) or not meta_path.exists():
             return "Unknown id."
         meta = json.loads(meta_path.read_text())
         meta["processed"] = True
@@ -978,7 +1040,7 @@ def list_inbox(new: int = 0, authorization: str | None = Header(None)):
 def get_file(item_id: str, authorization: str | None = Header(None)):
     require_token(authorization)
     path = INBOX_DIR / f"{item_id}.pdf"
-    if "/" in item_id or not path.exists():
+    if not valid_item_id(item_id) or not path.exists():
         raise HTTPException(status_code=404)
     return FileResponse(path, media_type="application/pdf", filename=path.name)
 
@@ -987,7 +1049,7 @@ def get_file(item_id: str, authorization: str | None = Header(None)):
 def ack(item_id: str, authorization: str | None = Header(None)):
     require_token(authorization)
     meta_path = INBOX_DIR / f"{item_id}.json"
-    if "/" in item_id or not meta_path.exists():
+    if not valid_item_id(item_id) or not meta_path.exists():
         raise HTTPException(status_code=404)
     meta = json.loads(meta_path.read_text())
     meta["processed"] = True

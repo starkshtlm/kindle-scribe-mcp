@@ -53,6 +53,20 @@ def test_forged_senders_are_rejected(sender):
     assert app.sender_is_authentic(mail)[0] is False
 
 
+@pytest.mark.parametrize(
+    "sender",
+    [
+        '"kindle@amazon.com" <evil@attacker.test>',  # domain hidden in the name
+        '"do-not-reply@amazon.com" <x@evil.test>',
+        "Amazon <amazon.com@attacker.test>",
+    ],
+)
+def test_a_display_name_cannot_impersonate_amazon(sender):
+    """The address is what counts, never the words in front of it."""
+    mail = dict(GENUINE, **{"from": sender})
+    assert app.sender_is_authentic(mail)[0] is False
+
+
 def test_trusted_from_without_authentication_is_rejected():
     """A From header alone proves nothing — DKIM or SPF must back it."""
     mail = dict(GENUINE, headers={})
@@ -314,8 +328,49 @@ def test_imap_adapter_matches_the_resend_shape():
     mail = _adapted()
     assert mail["to"] == ["inbox@scribe.example.com"]
     assert mail["received_for"] == ["inbox@scribe.example.com"]
-    assert "dkim-signature" in mail["headers"]
     assert "amazon.com/gp/f.html" in mail["html"]
+
+
+def test_adapter_drops_the_unverifiable_dkim_header():
+    """Anyone who can mail this address can write d=amazon.com into a
+    DKIM-Signature header, so it must not reach the trust check."""
+    assert "dkim-signature" not in _adapted()["headers"]
+
+
+def test_forged_dkim_signature_does_not_authenticate_over_imap():
+    forged = (
+        RAW_AMAZON.replace(b"Authentication-Results", b"X-Was-Auth")
+        .replace(b"Received-SPF", b"X-Was-Spf")
+    )
+    assert b"d=amazon.com" in forged  # the header the attacker controls
+    assert app.sender_is_authentic(_adapted(forged))[0] is False
+
+
+def test_only_the_provider_authentication_results_is_trusted():
+    """A second Authentication-Results travelled with the message; ours is the
+    one on top. Trusting the wrong one hands the check to the sender."""
+    forged = RAW_AMAZON.replace(
+        b"Authentication-Results: mx.google.com; dkim=pass header.i=@amazon.com;"
+        b" spf=pass smtp.mailfrom=bounces.amazon.com",
+        b"Authentication-Results: mx.google.com; dkim=fail header.i=@attacker.test;"
+        b" spf=fail smtp.mailfrom=attacker.test\r\n"
+        b"Authentication-Results: mx.google.com; dkim=pass header.i=@amazon.com;"
+        b" spf=pass smtp.mailfrom=bounces.amazon.com",
+    )
+    assert app.sender_is_authentic(_adapted(forged))[0] is False
+
+
+def test_spf_prose_is_not_a_verification_result():
+    """`domain of amazon.com designates ...` is free text the sender writes."""
+    mail = dict(
+        GENUINE,
+        headers={
+            "received-spf": "pass (domain of amazon.com designates 1.2.3.4)",
+            "authentication-results": "mx.google.com; spf=pass "
+            "smtp.mailfrom=attacker.test",
+        },
+    )
+    assert app.sender_is_authentic(mail)[0] is False
 
 
 def test_genuine_mail_passes_the_same_checks_over_imap():
@@ -347,3 +402,47 @@ def test_mail_to_a_different_address_rejected_over_imap():
                  b"Delivered-To: other@example.com")
     )
     assert app.addressed_to_us(mail)[0] is False
+
+
+# --- outbound rendering and item ids ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        '<img src="http://169.254.169.254/latest/meta-data">',
+        "<script>fetch('http://127.0.0.1:8377')</script>",
+        '"><link rel=stylesheet href="http://evil.test/x.css">',
+    ],
+)
+def test_a_model_supplied_title_cannot_inject_markup(title):
+    """The title bypassed sanitize_html_for_pdf, which only ever saw the body,
+    and WeasyPrint fetches whatever it is handed."""
+    html = app.document_html(title, "<p>body</p>", "meta")
+    # The text may survive; what must not is a tag the renderer would fetch.
+    for tag in ("<img", "<script", "<link"):
+        assert tag not in html.lower()
+    assert "&lt;" in html
+
+
+def test_the_title_still_reaches_the_page():
+    assert "Plan &amp; notes" in app.document_html("Plan & notes", "<p>x</p>", "m")
+
+
+@pytest.mark.parametrize(
+    "item_id",
+    [
+        "../../etc/passwd",
+        "..\\..\\windows\\win.ini",  # blocking "/" alone misses this one
+        "1754400000-ok/../../x",
+        "1754400000-ok\\..\\x",
+        "",
+        "no-timestamp",
+    ],
+)
+def test_traversal_item_ids_are_refused(item_id):
+    assert app.valid_item_id(item_id) is False
+
+
+def test_real_item_ids_are_accepted():
+    assert app.valid_item_id(f"{int(__import__('time').time())}-my-plan-2") is True

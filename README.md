@@ -21,7 +21,9 @@ terminal — because the bridge is an MCP server.
 ## What you need
 
 - A **Kindle Scribe** (or any Kindle that supports writing on PDFs)
-- An **email account you already have** — Gmail, iCloud or Outlook
+- An **email account you already have** that can issue an app password —
+  Gmail, iCloud, Fastmail or your own domain. Not Outlook.com or Google
+  Workspace; both require OAuth now (see docs/troubleshooting.md)
 - Docker
 
 That is it. No domain, no DNS, no webhook. **About five minutes.**

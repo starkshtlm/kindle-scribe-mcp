@@ -24,12 +24,28 @@ the mail path is the only one that works.
 Use an *app password*, never your account password, and turn on 2FA first —
 providers only issue app passwords once 2FA is enabled. Gmail:
 myaccount.google.com/apppasswords. iCloud: appleid.apple.com → Sign-In and
-Security. Outlook.com: account.live.com/proofs/AppPassword.
+Security.
+
+**Outlook.com, Hotmail, Live or MSN: this path does not work at all.**
+Microsoft removed password sign-in for third-party IMAP/SMTP on personal
+accounts on 2024-09-16, and app passwords went with it — the only symptom is an
+authentication failure that looks like a typo. `setup.sh` stops you here on
+purpose. Use Gmail, iCloud, Fastmail or your own domain, or take the Resend
+path.
 
 **Google Workspace account: there is no app-password option.**
 Google removed app passwords for Workspace accounts, so a `you@yourcompany.com`
-Google account cannot use this path. Use a personal Gmail/iCloud/Outlook
+Google account cannot use this path. Use a personal Gmail/iCloud/Fastmail
 address, or switch to the domain (Resend) path.
+
+**A returning document is rejected with "no receiving server verified this
+sender".**
+Over IMAP the bridge trusts only the topmost `Authentication-Results` header —
+the one your own provider added — and ignores the message's `DKIM-Signature`
+entirely, because anyone who can mail you can write `d=amazon.com` into it.
+If your provider does not stamp `Authentication-Results`, or a forwarding rule
+strips it, genuine mail is refused too. Forward to a mailbox that stamps it
+(Gmail, iCloud and Fastmail all do), or use the Resend path.
 
 **Documents send fine but nothing comes back.**
 The bridge only looks at unread mail *from Amazon* in `IMAP_FOLDER`. Check that

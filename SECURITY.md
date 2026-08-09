@@ -18,9 +18,20 @@ your inbox). The design assumptions:
    catch-all — any address at your domain reaches the webhook — and a valid
    Svix signature only proves Resend relayed the message, *not* that Amazon
    sent it. Mail is therefore accepted only when it is addressed to
-   `RETURN_EMAIL` **and** the sender domain is trusted **and** DKIM or SPF
-   backs that domain. Rejections are logged and pushed via ntfy, never
-   silently dropped.
+   `RETURN_EMAIL` **and** the sender domain is trusted **and** a receiving
+   server said it verified that domain. Rejections are logged and pushed via
+   ntfy, never silently dropped.
+
+   The sender domain comes from `parseaddr`, so a display name reading
+   `"kindle@amazon.com" <evil@attacker.test>` is the attacker, not Amazon. The
+   verification result is read only from the *topmost* `Authentication-Results`
+   or `Received-SPF` header — the one the receiving server prepended — and only
+   from its labelled fields (`header.d`, `smtp.mailfrom`), never from the free
+   text around them. Over the mailbox (IMAP) transport the message's own
+   `DKIM-Signature` header is discarded: the bridge does not verify signatures,
+   and anyone who can mail the address can write `d=amazon.com` into that
+   header. It survives as a fallback only on the Resend path, where Resend's MX
+   accepted the message upstream.
 
 2. **Links in mail are untrusted.** The first link must be HTTPS on an Amazon
    host. Redirects cannot be disabled (Amazon's `/gp/f.html` forwards to S3),

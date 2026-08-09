@@ -56,14 +56,21 @@ def _body(message: Message, subtype: str) -> str:
 def to_resend_shape(raw: bytes) -> dict:
     """Adapt a raw message to the dict Resend's receiving API returns.
 
-    Header names are lowercased and repeated headers are kept as lists, which
-    is what sender_is_authentic expects when it looks for DKIM-Signature and
-    Authentication-Results.
+    Header names are lowercased and repeated headers are kept as lists, in
+    arrival order — the first Authentication-Results is the one our own
+    provider wrote, and sender_is_authentic trusts only that one.
+
+    DKIM-Signature is dropped on purpose. It is part of the message, so anyone
+    who can mail this address can write `d=amazon.com` into it; it is proof of
+    nothing without verifying the signature, which we do not do. Over Resend it
+    survives as a fallback because Resend's MX accepted the mail upstream.
     """
     message = email.message_from_bytes(raw)
     headers: dict[str, object] = {}
     for key, value in message.items():
         key = key.lower()
+        if key == "dkim-signature":
+            continue
         if key in headers:
             existing = headers[key]
             headers[key] = (existing if isinstance(existing, list) else [existing]) + [

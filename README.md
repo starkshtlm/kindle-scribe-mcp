@@ -21,29 +21,40 @@ terminal — because the bridge is an MCP server.
 ## What you need
 
 - A **Kindle Scribe** (or any Kindle that supports writing on PDFs)
-- A **[Resend](https://resend.com)** account — free tier is plenty
-- A **domain** you can add DNS records to (a subdomain such as
-  `scribe.yourdomain.com` is recommended)
-- Somewhere to run a small container with **public HTTPS**
+- An **email account you already have** — Gmail, iCloud or Outlook
+- Docker
 
-Setup takes about 30 minutes, most of it waiting for DNS.
+That is it. No domain, no DNS, no webhook. **About five minutes.**
 
 ## Quick start
 
 ```bash
 git clone https://github.com/starkshtlm/kindle-scribe-mcp
 cd kindle-scribe-mcp
-./setup.sh          # asks for your keys, writes .env, prints the next steps
+./setup.sh          # pick "mailbox", paste an app password
 docker compose up -d
 ```
 
-`setup.sh` prints the two things it cannot do for you (adding the sender to
-Amazon's approved list, registering the Resend webhook) and the exact connector
-URL to paste into Claude.
+Then two things `setup.sh` cannot do for you:
 
-### Exposing it
+1. Add your own email address to Amazon's *Approved Personal Document E-mail
+   List* (amazon.com/mycd → Preferences → Personal Document Settings)
+2. Connect Claude Code:
+   ```bash
+   claude mcp add --transport http --scope user kindle-scribe \
+     http://127.0.0.1:8377/<MCP_TOKEN>/mcp
+   ```
 
-The bridge listens on `127.0.0.1:8377` and must be reachable over public HTTPS.
+Ask Claude to send something to your Kindle. Write on it. Share it back by
+email to yourself — the bridge watches that mailbox and picks it up.
+
+Works with **any MCP client**, not just Claude: Claude Code, Cursor, VS Code
+agents and anything else that speaks the protocol.
+
+### Using it from claude.ai chats
+
+Chats on claude.ai and the mobile app need the bridge on a public HTTPS URL.
+Deploy it somewhere reachable and use that hostname in the connector URL:
 
 | Option | How |
 |---|---|
@@ -51,19 +62,31 @@ The bridge listens on `127.0.0.1:8377` and must be reachable over public HTTPS.
 | **Your own VPS** | `deploy/Caddyfile.example` — two lines, automatic Let's Encrypt |
 | **Behind a firewall / broker cannot reach you** | `worker/` — a Cloudflare Worker relay, see [troubleshooting](docs/troubleshooting.md#mcp--connector) |
 
-### Connecting Claude
+Then add a custom connector under Settings → Connectors with
+`https://<your-host>/<MCP_TOKEN>/mcp`. The token in the path is the only
+credential — treat the whole URL as a password.
 
-Add a custom connector with the URL `setup.sh` printed:
+### Production setup: your own sending domain
 
+The mailbox path polls your inbox once a minute and stores an app password. If
+you would rather have instant push delivery, a sender on your own domain, or
+you use a Google Workspace account (which cannot issue app passwords), run
+`./setup.sh` and pick the **domain** option. It uses
+[Resend](https://resend.com) — free tier covers 3,000 mails a month — and needs
+a domain with DNS access.
+
+Once the bridge is publicly reachable, finish it in one command:
+
+```bash
+./scribe-finish https://bridge.yourdomain.com
 ```
-https://<your-host>/<MCP_TOKEN>/mcp
-```
 
-- **Claude chats (web + mobile):** Settings → Connectors → Add custom connector
-- **Claude Code:** `claude mcp add --transport http --scope user kindle-scribe "<url>"`
+That creates the inbound webhook through Resend's API, writes its signing
+secret into `.env`, and verifies that your domain has both sending *and*
+receiving enabled — the setting people miss most often.
 
-The token in the path is the only credential — treat the whole URL as a
-password.
+Switching between the two is one line in `.env` plus a restart. Nothing about
+your stored documents changes.
 
 Optionally install the plugin for `/scribe-send` and `/scribe-fetch` slash
 commands in Claude Code:

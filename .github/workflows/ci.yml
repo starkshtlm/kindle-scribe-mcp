@@ -34,11 +34,27 @@ jobs:
 
       - name: Security regression tests (inbound trust boundary)
         run: |
-          python3 -m pip install --quiet pytest httpx fastapi python-multipart mcp markdown
+          python3 -m pip install --quiet -r server/requirements.txt pytest
           python3 -m pytest server/test_security.py -q
 
       - name: Build image
         run: docker build -t kindle-scribe-mcp:ci .
+
+      - name: Start container in mailbox mode (no Resend credentials at all)
+        run: |
+          docker run -d --name mailbox-bridge \
+            -e MAIL_TRANSPORT=mailbox \
+            -e KINDLE_EMAIL=ci@kindle.com \
+            -e RETURN_EMAIL=ci@example.com \
+            -e BRIDGE_TOKEN=citoken \
+            -e SMTP_HOST=smtp.example.com -e SMTP_USER=ci@example.com \
+            -e SMTP_PASSWORD=x -e IMAP_HOST=imap.example.com \
+            kindle-scribe-mcp:ci
+          sleep 8
+          docker logs mailbox-bridge
+          docker ps --filter name=mailbox-bridge --filter status=running \
+            --format '{{.Names}}' | grep -q mailbox-bridge
+          docker rm -f mailbox-bridge
 
       - name: Start container
         run: |

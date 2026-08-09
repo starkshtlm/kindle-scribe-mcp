@@ -18,6 +18,7 @@ os.environ.setdefault("BRIDGE_TOKEN", "testtoken")
 os.environ.setdefault("RETURN_EMAIL", "inbox@scribe.example.com")
 os.environ.setdefault("INBOX_DIR", "/tmp/scribe-test-inbox")
 
+os.environ.setdefault("MAIL_TRANSPORT", "resend")
 sys.path.insert(0, os.path.dirname(__file__))
 app = importlib.import_module("app")
 
@@ -284,3 +285,65 @@ def test_webhook_secret_is_documented_as_required():
     text = (Path(app.__file__).resolve().parent.parent / ".env.example").read_text()
     assert "RESEND_WEBHOOK_SECRET" in _env_example()
     assert text.index("RESEND_WEBHOOK_SECRET") < text.index("--- Optional ---")
+
+
+# --- mailbox transport ------------------------------------------------------
+# The IMAP path must reuse the same trust boundary as the webhook path. These
+# tests exist so a future change to the adapter cannot quietly bypass it.
+
+RAW_AMAZON = b"""Delivered-To: inbox@scribe.example.com
+Received-SPF: pass (domain of bounces.amazon.com designates 54.240.13.28 as permitted sender)
+Authentication-Results: mx.google.com; dkim=pass header.i=@amazon.com; spf=pass smtp.mailfrom=bounces.amazon.com
+DKIM-Signature: v=1; a=rsa-sha256; d=amazon.com; s=abc; h=From:To:Subject
+From: "Amazon" <do-not-reply@amazon.com>
+To: inbox@scribe.example.com
+Subject: Daniel sent a file "my-plan" to you from their Kindle
+Message-ID: <01000198abcdef@email.amazonses.com>
+Content-Type: text/html; charset=UTF-8
+
+<html><a href="https://www.amazon.com/gp/f.html?C=ABC">Download</a></html>
+"""
+
+
+def _adapted(raw=RAW_AMAZON):
+    import mailbox as mb
+    return mb.to_resend_shape(raw)
+
+
+def test_imap_adapter_matches_the_resend_shape():
+    mail = _adapted()
+    assert mail["to"] == ["inbox@scribe.example.com"]
+    assert mail["received_for"] == ["inbox@scribe.example.com"]
+    assert "dkim-signature" in mail["headers"]
+    assert "amazon.com/gp/f.html" in mail["html"]
+
+
+def test_genuine_mail_passes_the_same_checks_over_imap():
+    mail = _adapted()
+    assert app.addressed_to_us(mail)[0] is True
+    assert app.sender_is_authentic(mail)[0] is True
+
+
+def test_forged_sender_rejected_over_imap():
+    mail = _adapted(RAW_AMAZON.replace(b"do-not-reply@amazon.com",
+                                       b"amazon@attacker.example"))
+    assert app.sender_is_authentic(mail)[0] is False
+
+
+def test_stripped_authentication_headers_rejected_over_imap():
+    """A message that never passed DKIM/SPF must not be trusted."""
+    mail = _adapted(
+        RAW_AMAZON.replace(b"DKIM-Signature", b"X-Was-Dkim")
+        .replace(b"Authentication-Results", b"X-Was-Auth")
+        .replace(b"Received-SPF", b"X-Was-Spf")
+    )
+    assert app.sender_is_authentic(mail)[0] is False
+
+
+def test_mail_to_a_different_address_rejected_over_imap():
+    mail = _adapted(
+        RAW_AMAZON.replace(b"To: inbox@scribe.example.com", b"To: other@example.com")
+        .replace(b"Delivered-To: inbox@scribe.example.com",
+                 b"Delivered-To: other@example.com")
+    )
+    assert app.addressed_to_us(mail)[0] is False

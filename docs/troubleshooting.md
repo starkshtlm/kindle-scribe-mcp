@@ -18,6 +18,29 @@ It was not sent as a PDF, or it got converted. Two rules: send **PDF only**
 disables page annotation. PDFs transferred over USB also cannot be annotated;
 the mail path is the only one that works.
 
+## Mailbox transport (SMTP + IMAP)
+
+**The app password is rejected.**
+Use an *app password*, never your account password, and turn on 2FA first —
+providers only issue app passwords once 2FA is enabled. Gmail:
+myaccount.google.com/apppasswords. iCloud: appleid.apple.com → Sign-In and
+Security. Outlook.com: account.live.com/proofs/AppPassword.
+
+**Google Workspace account: there is no app-password option.**
+Google removed app passwords for Workspace accounts, so a `you@yourcompany.com`
+Google account cannot use this path. Use a personal Gmail/iCloud/Outlook
+address, or switch to the domain (Resend) path.
+
+**Documents send fine but nothing comes back.**
+The bridge only looks at unread mail *from Amazon* in `IMAP_FOLDER`. Check that
+a rule or filter is not moving Amazon's mail out of the inbox before the poll
+sees it, and that you shared to the address in `RETURN_EMAIL` (with this
+transport that is your own address). Rejections are logged and pushed to ntfy.
+
+**It takes up to a minute.**
+That is the poll interval. Lower `IMAP_POLL_SECONDS` if you want, but every
+poll is a login — a minute is a reasonable balance.
+
 ## Receiving
 
 **You shared from the Scribe but nothing arrives.**

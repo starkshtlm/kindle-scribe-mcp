@@ -10,6 +10,7 @@ MCP:      Mounted at /<MCP_TOKEN>/mcp (streamable HTTP) so Claude chats and
           is the auth — treat the whole URL as a secret.
 """
 
+import asyncio
 import base64
 import contextlib
 import hashlib
@@ -18,12 +19,14 @@ import ipaddress
 import json
 import os
 import re
+import smtplib
 import socket
 import subprocess
 import tempfile
 import time
 import unicodedata
 from datetime import date
+from email.message import EmailMessage
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -41,10 +44,35 @@ def required_env(name: str, hint: str) -> str:
     return value
 
 
-RESEND_API_KEY = required_env("RESEND_API_KEY", "create one at resend.com/api-keys")
+# "mailbox" needs nothing but an existing email account: SMTP out, IMAP in, no
+# domain, no DNS, no webhook. "resend" is the domain-backed path with instant
+# push delivery. Both are first class; only the setup effort differs.
+MAIL_TRANSPORT = os.environ.get("MAIL_TRANSPORT", "resend").strip().lower()
+if MAIL_TRANSPORT not in ("mailbox", "resend"):
+    raise SystemExit("MAIL_TRANSPORT must be 'mailbox' or 'resend'.")
+
 KINDLE_EMAIL = required_env("KINDLE_EMAIL", "your device's @kindle.com address")
-FROM_EMAIL = required_env("FROM_EMAIL", "sender on your Resend-verified domain")
 BRIDGE_TOKEN = required_env("BRIDGE_TOKEN", "generate with: openssl rand -hex 32")
+
+if MAIL_TRANSPORT == "resend":
+    RESEND_API_KEY = required_env(
+        "RESEND_API_KEY", "create one at resend.com/api-keys"
+    )
+    FROM_EMAIL = required_env(
+        "FROM_EMAIL", "sender on your Resend-verified domain"
+    )
+    SMTP_HOST = SMTP_USER = SMTP_PASSWORD = ""
+    SMTP_PORT = 0
+else:
+    RESEND_API_KEY = ""
+    SMTP_HOST = required_env("SMTP_HOST", "e.g. smtp.gmail.com")
+    SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+    SMTP_USER = required_env("SMTP_USER", "the mailbox address you send from")
+    SMTP_PASSWORD = required_env(
+        "SMTP_PASSWORD", "an app password, not your account password"
+    )
+    # Amazon matches the approved-sender list on this address.
+    FROM_EMAIL = os.environ.get("FROM_EMAIL", "").strip() or SMTP_USER
 WEBHOOK_SECRET = os.environ.get("RESEND_WEBHOOK_SECRET", "")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
 MCP_TOKEN = os.environ.get("MCP_TOKEN", "")
@@ -74,11 +102,18 @@ def warn_if_inbound_is_dead() -> list[str]:
             "RETURN_EMAIL is not set — every incoming document will be rejected. "
             "Set it to the address you share to from the Scribe."
         )
-    if not os.environ.get("RESEND_WEBHOOK_SECRET", "").strip():
+    if MAIL_TRANSPORT == "resend" and not os.environ.get(
+        "RESEND_WEBHOOK_SECRET", ""
+    ).strip():
         problems.append(
             "RESEND_WEBHOOK_SECRET is not set — the webhook answers 503 and no "
             "document can arrive. Register the webhook in Resend and paste its "
             "signing secret here."
+        )
+    if MAIL_TRANSPORT == "mailbox" and not os.environ.get("IMAP_HOST", "").strip():
+        problems.append(
+            "IMAP_HOST is not set — nothing polls for returning documents. Set it "
+            "to your provider's IMAP server, e.g. imap.gmail.com."
         )
     return problems
 
@@ -309,6 +344,34 @@ def prune_inbox() -> None:
             path.unlink(missing_ok=True)
 
 
+def smtp_send_pdf(filename: str, data: bytes) -> str:
+    """Send through an ordinary mailbox. Needs no domain — and the sender is
+    the address the user already put on Amazon's approved list."""
+    message = EmailMessage()
+    message["From"] = FROM_EMAIL
+    message["To"] = KINDLE_EMAIL
+    # Never "convert": that makes Amazon reflow the PDF, which disables
+    # write-on-page annotation on the Scribe.
+    message["Subject"] = Path(filename).stem
+    message.set_content("Sent via scribe-bridge.")
+    message.add_attachment(
+        data, maintype="application", subtype="pdf", filename=filename
+    )
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=120) as smtp:
+        smtp.login(SMTP_USER, SMTP_PASSWORD)
+        smtp.send_message(message)
+    return "smtp"
+
+
+async def send_pdf(filename: str, data: bytes) -> str:
+    """Deliver a PDF to the Kindle over whichever transport is configured."""
+    if len(data) > MAX_DOC_BYTES:
+        raise ValueError("document too large for Kindle (max ~45 MB)")
+    if MAIL_TRANSPORT == "mailbox":
+        return await asyncio.to_thread(smtp_send_pdf, filename, data)
+    return await resend_send_pdf(filename, data)
+
+
 async def resend_send_pdf(filename: str, data: bytes) -> str:
     if len(data) > MAX_DOC_BYTES:
         raise ValueError("document too large for Kindle (max ~45 MB)")
@@ -524,7 +587,7 @@ if MCP_TOKEN:
         meta = f"{date.today().isoformat()} · Sent by Claude via scribe-bridge"
         pdf = render_pdf(title, body, meta)
         slug = remember_source(title, content_markdown)
-        await resend_send_pdf(f"{slug}.pdf", pdf)
+        await send_pdf(f"{slug}.pdf", pdf)
         return (
             f"Sent to {KINDLE_EMAIL} ({len(pdf) // 1024} kB). It appears on the "
             "Scribe within a minute (the device needs wifi). Remind the user: "
@@ -657,14 +720,37 @@ if MCP_TOKEN:
 
 
 @contextlib.asynccontextmanager
+async def mailbox_poller():
+    """Run the IMAP poll loop for the lifetime of the app, when configured."""
+    if MAIL_TRANSPORT != "mailbox":
+        yield
+        return
+    import mailbox as mailbox_transport
+
+    task = asyncio.create_task(
+        mailbox_transport.poll_forever(
+            store_document, already_processed, mark_processed,
+            SMTP_USER, SMTP_PASSWORD,
+        )
+    )
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+@contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     # FastAPI does not run mounted sub-apps' lifespans; the MCP session
     # manager must be started here or every MCP request 500s.
-    if mcp is not None:
-        async with mcp.session_manager.run():
+    async with mailbox_poller():
+        if mcp is not None:
+            async with mcp.session_manager.run():
+                yield
+        else:
             yield
-    else:
-        yield
 
 
 app = FastAPI(lifespan=lifespan)
@@ -701,7 +787,7 @@ async def send_to_kindle(
     data = b"".join(chunks)
     filename = file.filename or "dokument.pdf"
     try:
-        resend_id = await resend_send_pdf(filename, data)
+        resend_id = await send_pdf(filename, data)
     except ValueError as e:
         raise HTTPException(status_code=413, detail=str(e))
     except RuntimeError as e:
@@ -787,33 +873,13 @@ async def fetch_pdf_safely(url: str) -> tuple[bytes | None, str]:
         return None, "too many redirects"
 
 
-@app.post("/webhook/inbound")
-async def inbound_webhook(request: Request):
-    body = await request.body()
-    # Fail closed: without a signing secret we cannot tell Resend from anyone.
-    if not WEBHOOK_SECRET:
-        raise HTTPException(status_code=503, detail="webhook secret not configured")
-    if not verify_svix(WEBHOOK_SECRET, request.headers, body):
-        raise HTTPException(status_code=401, detail="bad signature")
+async def store_document(email: dict) -> dict:
+    """Validate a received mail and store the annotated PDF it points at.
 
-    timestamp = request.headers.get("svix-timestamp", "")
-    try:
-        if abs(int(time.time()) - int(timestamp)) > REPLAY_WINDOW_SECONDS:
-            raise HTTPException(status_code=401, detail="stale signature")
-    except ValueError:
-        raise HTTPException(status_code=401, detail="bad timestamp")
-    msg_id = request.headers.get("svix-id", "")
-    if msg_id and already_processed(msg_id):
-        return {"ignored": "replay"}
-
-    event = json.loads(body)
-    if event.get("type") != "email.received":
-        return {"ignored": event.get("type")}
-    email_id = event["data"].get("email_id") or event["data"].get("id")
-    email = await fetch_received_email(email_id)
-
-    # Resend inbound is catch-all, so verify the mail was addressed to us and
-    # genuinely authenticated as Amazon before touching anything inside it.
+    Every inbound transport funnels through here, so the trust boundary is
+    defined exactly once: mail must be addressed to us and provably from
+    Amazon before anything inside it is touched.
+    """
     ok, detail = addressed_to_us(email)
     if not ok:
         notify_rejection(detail)
@@ -840,7 +906,7 @@ async def inbound_webhook(request: Request):
             break
     if pdf is None:
         notify_rejection(f"could not fetch a PDF ({why})")
-        raise HTTPException(status_code=422, detail=f"no pdf fetched: {why}")
+        return {"error": f"no pdf fetched: {why}"}
 
     item_id = f"{int(time.time())}-{slugify(title)}"
     (INBOX_DIR / f"{item_id}.pdf").write_bytes(pdf)
@@ -861,9 +927,45 @@ async def inbound_webhook(request: Request):
     )
     notify(title)
     prune_inbox()
-    if msg_id:
-        mark_processed(msg_id)
     return {"stored": item_id}
+
+
+@app.post("/webhook/inbound")
+async def inbound_webhook(request: Request):
+    body = await request.body()
+    # Fail closed: without a signing secret we cannot tell Resend from anyone.
+    if not WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="webhook secret not configured")
+    if not verify_svix(WEBHOOK_SECRET, request.headers, body):
+        raise HTTPException(status_code=401, detail="bad signature")
+
+    timestamp = request.headers.get("svix-timestamp", "")
+    try:
+        if abs(int(time.time()) - int(timestamp)) > REPLAY_WINDOW_SECONDS:
+            raise HTTPException(status_code=401, detail="stale signature")
+    except ValueError:
+        raise HTTPException(status_code=401, detail="bad timestamp")
+    msg_id = request.headers.get("svix-id", "")
+    if msg_id and already_processed(msg_id):
+        return {"ignored": "replay"}
+
+    try:
+        event = json.loads(body)
+        if event.get("type") != "email.received":
+            return {"ignored": event.get("type")}
+        email_id = event["data"]["email_id"] if "email_id" in event["data"] else event["data"]["id"]
+    except (ValueError, KeyError, TypeError):
+        raise HTTPException(status_code=400, detail="malformed event")
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", str(email_id)):
+        raise HTTPException(status_code=400, detail="malformed email id")
+
+    result = await store_document(await fetch_received_email(email_id))
+    if "error" in result:
+        raise HTTPException(status_code=422, detail=result["error"])
+    # Record only after success, so a retry after a failed fetch still works.
+    if msg_id and "stored" in result:
+        mark_processed(msg_id)
+    return result
 
 
 @app.get("/inbox")

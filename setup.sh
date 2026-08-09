@@ -46,29 +46,56 @@ fi
 bold "kindle-scribe-mcp setup"
 cat <<'EOF'
 
-You need two accounts before continuing:
-  1. resend.com  — free tier is plenty. Add a domain (a SUBdomain such as
-     scribe.yourdomain.com is recommended so it cannot disturb your normal
-     mail), set the DNS records it shows, and enable BOTH Sending and
-     Receiving. Note: the "Enable Receiving" toggle must be switched on from
-     the domain's page after the domain verifies — turning it on in the
-     add-domain form does not always stick.
-  2. amazon.com/mycd -> Preferences -> Personal Document Settings, where you
-     find your @kindle.com address.
+Two ways to move mail between Claude and your Kindle:
+
+  [1] Mailbox (fastest)  Uses an email account you already have. No domain,
+      no DNS, no webhook — the bridge sends over SMTP and checks for returning
+      documents over IMAP. Ready in about five minutes.
+      You need: an app password (Gmail/iCloud/Outlook all support these;
+      Google Workspace accounts do NOT — pick option 2 there).
+
+  [2] Domain (Resend)    Your own sending domain with instant push delivery
+      instead of polling. Needs a domain, DNS records and a Resend account.
+
+Either way you also need your Kindle address from
+amazon.com/mycd -> Preferences -> Personal Document Settings.
 
 EOF
-read -r -p "Press enter when both are ready. "
+ask TRANSPORT_CHOICE "Which one? [1/2]" "1"
 
-echo
-ask RESEND_API_KEY   "Resend API key (re_...)"
-ask KINDLE_EMAIL     "Your Kindle address (...@kindle.com)"
-ask MAIL_DOMAIN      "Your Resend domain (e.g. scribe.yourdomain.com)"
-ask FROM_LOCAL       "Sender local-part" "claude"
-ask INBOX_LOCAL      "Return-address local-part" "inbox"
-ask NTFY             "ntfy.sh topic for phone pushes (blank to skip)" " "
-# The webhook signing secret is deliberately not asked for here: it does not
-# exist until the service is running on a public URL and the webhook has been
-# registered in Resend. Step 3 below fills it in.
+ask KINDLE_EMAIL "Your Kindle address (...@kindle.com)"
+ask NTFY         "ntfy.sh topic for phone pushes (blank to skip)" " "
+BRIDGE_TOKEN=$(gen 32)
+MCP_TOKEN=$(gen 24)
+
+if [ "$TRANSPORT_CHOICE" = "2" ]; then
+  MAIL_TRANSPORT=resend
+  ask RESEND_API_KEY "Resend API key (re_...)"
+  ask MAIL_DOMAIN    "Your Resend domain (e.g. scribe.yourdomain.com)"
+  ask FROM_LOCAL     "Sender local-part" "claude"
+  ask INBOX_LOCAL    "Return-address local-part" "inbox"
+  FROM_EMAIL="${FROM_LOCAL}@${MAIL_DOMAIN}"
+  RETURN_EMAIL="${INBOX_LOCAL}@${MAIL_DOMAIN}"
+else
+  MAIL_TRANSPORT=mailbox
+  ask SMTP_USER "Your email address (this becomes the approved sender)"
+  echo
+  echo "  App password, not your normal password:"
+  echo "    Gmail    myaccount.google.com/apppasswords  (needs 2FA on)"
+  echo "    iCloud   appleid.apple.com -> Sign-In and Security"
+  echo "    Outlook  account.live.com/proofs/AppPassword"
+  ask SMTP_PASSWORD "App password"
+  # Recognise the common providers so nobody has to look up host names.
+  case "${SMTP_USER##*@}" in
+    gmail.com|googlemail.com) SMTP_HOST=smtp.gmail.com;   IMAP_HOST=imap.gmail.com ;;
+    icloud.com|me.com|mac.com) SMTP_HOST=smtp.mail.me.com; IMAP_HOST=imap.mail.me.com ;;
+    outlook.com|hotmail.com|live.com) SMTP_HOST=smtp-mail.outlook.com; IMAP_HOST=outlook.office365.com ;;
+    yahoo.com) SMTP_HOST=smtp.mail.yahoo.com; IMAP_HOST=imap.mail.yahoo.com ;;
+    *) ask SMTP_HOST "SMTP server"; ask IMAP_HOST "IMAP server" ;;
+  esac
+  FROM_EMAIL="${SMTP_USER}"
+  RETURN_EMAIL="${SMTP_USER}"
+fi
 
 FROM_EMAIL="${FROM_LOCAL}@${MAIL_DOMAIN}"
 RETURN_EMAIL="${INBOX_LOCAL}@${MAIL_DOMAIN}"  # enforced by the bridge
@@ -76,17 +103,26 @@ BRIDGE_TOKEN=$(gen 32)
 MCP_TOKEN=$(gen 24)
 
 cat > .env <<EOF
-RESEND_API_KEY=${RESEND_API_KEY}
-RETURN_EMAIL=${RETURN_EMAIL}
+MAIL_TRANSPORT=${MAIL_TRANSPORT}
 KINDLE_EMAIL=${KINDLE_EMAIL}
 FROM_EMAIL=${FROM_EMAIL}
+RETURN_EMAIL=${RETURN_EMAIL}
 BRIDGE_TOKEN=${BRIDGE_TOKEN}
 MCP_TOKEN=${MCP_TOKEN}
 MCP_ALLOWED_HOSTS=*
-RESEND_WEBHOOK_SECRET=
 NTFY_TOPIC=$(echo "$NTFY" | xargs)
 INBOX_RETENTION_DAYS=30
 INBOX_DIR=/data/inbox
+OUTBOX_DIR=/data/outbox
+RESEND_API_KEY=${RESEND_API_KEY:-}
+RESEND_WEBHOOK_SECRET=
+SMTP_HOST=${SMTP_HOST:-}
+SMTP_PORT=465
+SMTP_USER=${SMTP_USER:-}
+SMTP_PASSWORD=${SMTP_PASSWORD:-}
+IMAP_HOST=${IMAP_HOST:-}
+IMAP_PORT=993
+IMAP_POLL_SECONDS=60
 EOF
 chmod 600 .env
 
@@ -107,8 +143,31 @@ fi
 echo
 bold "Wrote .env and $BRIDGE_ENV"
 echo
-bold "Do these three things now:"
+
+if [ "$MAIL_TRANSPORT" = "mailbox" ]; then
 cat <<EOF
+$(bold "Two things left:")
+
+1. Amazon: add this address to the Approved Personal Document E-mail List
+   at amazon.com/mycd -> Preferences -> Personal Document Settings:
+     ${FROM_EMAIL}
+
+2. Start the bridge:
+     docker compose up -d
+
+That is it — no domain, no webhook, nothing to expose. Connect Claude Code:
+     claude mcp add --transport http --scope user kindle-scribe \\
+       http://127.0.0.1:8377/${MCP_TOKEN}/mcp
+
+Ask Claude to send something to your Kindle, write on it, then share it by
+email back to ${RETURN_EMAIL} — the bridge checks that mailbox every minute.
+
+Want it available in claude.ai chats too? Put the bridge behind public HTTPS
+(see README) and use that hostname in the connector URL instead.
+EOF
+else
+cat <<EOF
+$(bold "Do these three things now:")
 
 1. Amazon: add this address to the Approved Personal Document E-mail List
      ${FROM_EMAIL}
@@ -119,22 +178,24 @@ cat <<EOF
    platform options are in the README), so it answers on e.g.
      https://bridge.yourdomain.com/healthz
 
-3. Resend -> Webhooks -> Add webhook:
-     URL:   https://<your-public-host>/webhook/inbound
-     Event: email.received
-   Put the signing secret it shows into RESEND_WEBHOOK_SECRET in .env and
-   restart (docker compose up -d).
+3. Register the Resend webhook — let the script do it:
+     ./scribe-finish https://<your-public-host>
 
-   This step is NOT optional. Until RESEND_WEBHOOK_SECRET is set the bridge
-   answers 503 to every delivery and nothing you share from the Scribe will
-   arrive. Resend keeps inbound mail for 30 days, so nothing is lost while you
-   finish this.
+   That creates the webhook, stores its signing secret in .env and restarts
+   the bridge. It also checks that your domain has BOTH sending and receiving
+   enabled, which is the setting people most often miss.
+
+   Until the signing secret is set the bridge answers 503 to every delivery and
+   nothing you share from the Scribe arrives. Resend keeps inbound mail for 30
+   days, so nothing is lost while you finish this.
 
 Then add the connector in Claude with this URL:
      https://<your-public-host>/${MCP_TOKEN}/mcp
 
 And on the Scribe, share annotated documents by email to:
      ${RETURN_EMAIL}
-
-Full walkthrough: README.md — stuck? docs/troubleshooting.md
 EOF
+fi
+
+echo
+echo "Full walkthrough: README.md — stuck? docs/troubleshooting.md"

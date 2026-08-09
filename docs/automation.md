@@ -4,7 +4,7 @@ By default you ask Claude to read your feedback. With a scheduled task, the
 interpretation is simply waiting for you: new arrivals are picked up, the
 handwriting is read, and a summary is pushed to your phone.
 
-This works because documents are paired with their source — a returning
+This works on either mail transport, because documents are paired with their source — a returning
 document arrives with the text it was made from, so the model can say *what
 changed*, not just what it sees.
 

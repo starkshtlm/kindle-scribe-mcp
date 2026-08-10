@@ -46,31 +46,37 @@ fi
 bold "kindle-scribe-mcp setup"
 cat <<'EOF'
 
-Two ways to move mail between Claude and your Kindle:
+Three ways to move mail between Claude and your Kindle. Sending always comes
+from an address you own; the difference is how documents come back.
 
-  [1] Mailbox (fastest)  Uses an email account you already have. No domain,
-      no DNS, no webhook — the bridge sends over SMTP and checks for returning
-      documents over IMAP. Ready in about five minutes.
+  [1] Mailbox (fastest)  Send over SMTP, poll the same mailbox over IMAP.
+      No domain, no DNS, no webhook, and the bridge never has to be reachable
+      from the internet. Documents come back within about a minute.
       You need: an app password. Gmail, iCloud, Fastmail and most own-domain
-      hosts issue them. Outlook.com/Hotmail and Google Workspace cannot —
-      pick option 2 there.
+      hosts issue them. Outlook.com/Hotmail and Google Workspace cannot.
 
-  [2] Domain (Resend)    Your own sending domain with instant push delivery
-      instead of polling. Needs a domain, DNS records and a Resend account.
+  [2] Mailbox + Resend inbound   Send over SMTP as above, but receive through
+      Resend's webhook on a free <id>.resend.app address — still no domain and
+      no DNS, and returning documents arrive instantly instead of on a poll.
+      You need: a Resend account and the bridge behind public HTTPS.
 
-Either way you also need your Kindle address from
+  [3] Domain (Resend)    Your own verified sending domain, push both ways.
+      Needs a domain, DNS records, a Resend account and public HTTPS.
+
+All three also need your Kindle address from
 amazon.com/mycd -> Preferences -> Personal Document Settings.
 
 EOF
-ask TRANSPORT_CHOICE "Which one? [1/2]" "1"
+ask TRANSPORT_CHOICE "Which one? [1/2/3]" "1"
+case "$TRANSPORT_CHOICE" in 1|2|3) ;; *) echo "Pick 1, 2 or 3."; exit 1 ;; esac
 
 ask KINDLE_EMAIL "Your Kindle address (...@kindle.com)"
 ask NTFY         "ntfy.sh topic for phone pushes (blank to skip)" " "
 BRIDGE_TOKEN=$(gen 32)
 MCP_TOKEN=$(gen 24)
 
-if [ "$TRANSPORT_CHOICE" = "2" ]; then
-  MAIL_TRANSPORT=resend
+if [ "$TRANSPORT_CHOICE" = "3" ]; then
+  MAIL_OUT=resend; MAIL_IN=resend
   ask RESEND_API_KEY "Resend API key (re_...)"
   ask MAIL_DOMAIN    "Your Resend domain (e.g. scribe.yourdomain.com)"
   ask FROM_LOCAL     "Sender local-part" "claude"
@@ -78,7 +84,8 @@ if [ "$TRANSPORT_CHOICE" = "2" ]; then
   FROM_EMAIL="${FROM_LOCAL}@${MAIL_DOMAIN}"
   RETURN_EMAIL="${INBOX_LOCAL}@${MAIL_DOMAIN}"
 else
-  MAIL_TRANSPORT=mailbox
+  MAIL_OUT=smtp
+  [ "$TRANSPORT_CHOICE" = "2" ] && MAIL_IN=resend || MAIL_IN=imap
   ask SMTP_USER "Your email address (this becomes the approved sender)"
   echo
   # Microsoft switched personal accounts to OAuth-only on 2024-09-16, so an
@@ -108,10 +115,20 @@ else
   esac
   FROM_EMAIL="${SMTP_USER}"
   RETURN_EMAIL="${SMTP_USER}"
+  if [ "$TRANSPORT_CHOICE" = "2" ]; then
+    echo
+    echo "  Resend gives every account a receiving address that needs no domain."
+    echo "  Find it at resend.com -> Emails -> Receiving -> Receiving address."
+    echo "  It looks like scribe@cool-hedgehog.resend.app; the local part is"
+    echo "  yours to choose, the domain is fixed."
+    ask RESEND_API_KEY "Resend API key (re_..., Full access)"
+    ask RETURN_EMAIL   "Your Resend receiving address"
+  fi
 fi
 
 cat > .env <<EOF
-MAIL_TRANSPORT=${MAIL_TRANSPORT}
+MAIL_OUT=${MAIL_OUT}
+MAIL_IN=${MAIL_IN}
 KINDLE_EMAIL=${KINDLE_EMAIL}
 FROM_EMAIL=${FROM_EMAIL}
 RETURN_EMAIL=${RETURN_EMAIL}
@@ -152,7 +169,7 @@ echo
 bold "Wrote .env and $BRIDGE_ENV"
 echo
 
-if [ "$MAIL_TRANSPORT" = "mailbox" ]; then
+if [ "$MAIL_IN" = "imap" ]; then
 cat <<EOF
 $(bold "Two things left:")
 
@@ -189,9 +206,9 @@ $(bold "Do these three things now:")
 3. Register the Resend webhook — let the script do it:
      ./scribe-finish https://<your-public-host>
 
-   That creates the webhook, stores its signing secret in .env and restarts
-   the bridge. It also checks that your domain has BOTH sending and receiving
-   enabled, which is the setting people most often miss.
+   That creates the webhook and stores its signing secret in .env. On a domain
+   of your own it also checks that BOTH sending and receiving are enabled,
+   which is the setting people most often miss.
 
    Until the signing secret is set the bridge answers 503 to every delivery and
    nothing you share from the Scribe arrives. Resend keeps inbound mail for 30

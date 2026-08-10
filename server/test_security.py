@@ -446,3 +446,94 @@ def test_traversal_item_ids_are_refused(item_id):
 
 def test_real_item_ids_are_accepted():
     assert app.valid_item_id(f"{int(__import__('time').time())}-my-plan-2") is True
+
+
+# --- transport selection ----------------------------------------------------
+# Outbound and inbound are chosen separately, so a fresh interpreter is needed
+# per combination: the module resolves its configuration at import time.
+
+
+def _load(env: dict):
+    """Import app.py in a subprocess with exactly this environment."""
+    import json as _json
+    import subprocess as _sp
+    from pathlib import Path
+
+    server = str(Path(app.__file__).resolve().parent)
+    base = {
+        "KINDLE_EMAIL": "x@kindle.com",
+        "BRIDGE_TOKEN": "t",
+        "RETURN_EMAIL": "inbox@example.com",
+        "INBOX_DIR": "/tmp/scribe-transport-test/inbox",
+        "OUTBOX_DIR": "/tmp/scribe-transport-test/outbox",
+        "PATH": os.environ.get("PATH", ""),
+    }
+    code = (
+        "import sys,json;sys.path.insert(0,%r);import app;"
+        "print(json.dumps({'out':app.MAIL_OUT,'in':app.MAIL_IN,"
+        "'from':app.FROM_EMAIL,'imap_user':app.IMAP_USER}))" % server
+    )
+    done = _sp.run([sys.executable, "-c", code], env={**base, **env},
+                   capture_output=True, text=True)
+    if done.returncode != 0:
+        return {"error": (done.stderr or done.stdout).strip().splitlines()[-1]}
+    return _json.loads(done.stdout.strip().splitlines()[-1])
+
+
+SMTP_ENV = {
+    "SMTP_HOST": "smtp.gmail.com",
+    "SMTP_USER": "me@gmail.com",
+    "SMTP_PASSWORD": "app-password",
+    "IMAP_HOST": "imap.gmail.com",
+}
+
+
+@pytest.mark.parametrize(
+    "transport,expected",
+    [("mailbox", ("smtp", "imap")), ("resend", ("resend", "resend"))],
+)
+def test_the_old_single_switch_still_selects_both_directions(transport, expected):
+    """Existing .env files must keep working across the upgrade."""
+    env = dict(SMTP_ENV, MAIL_TRANSPORT=transport)
+    if transport == "resend":
+        env = {"MAIL_TRANSPORT": transport, "RESEND_API_KEY": "re_x",
+               "FROM_EMAIL": "claude@scribe.example.com"}
+    got = _load(env)
+    assert (got.get("out"), got.get("in")) == expected, got
+
+
+def test_sending_over_smtp_while_receiving_through_resend():
+    """The hybrid: no domain of your own, but push instead of polling."""
+    got = _load(dict(SMTP_ENV, MAIL_OUT="smtp", MAIL_IN="resend",
+                     RESEND_API_KEY="re_x"))
+    assert (got.get("out"), got.get("in")) == ("smtp", "resend"), got
+    assert got["from"] == "me@gmail.com"  # Amazon's approved sender
+
+
+def test_receiving_through_resend_still_needs_the_api_key():
+    """The webhook carries only metadata; the mail body is fetched afterwards,
+    so a missing key would fail on the first returning document instead."""
+    got = _load(dict(SMTP_ENV, MAIL_OUT="smtp", MAIL_IN="resend"))
+    assert "RESEND_API_KEY" in got.get("error", "")
+
+
+def test_polling_can_read_a_different_mailbox_than_it_sends_from():
+    got = _load(dict(SMTP_ENV, MAIL_OUT="smtp", MAIL_IN="imap",
+                     IMAP_USER="scribe@gmail.com", IMAP_PASSWORD="other"))
+    assert got["imap_user"] == "scribe@gmail.com"
+    assert got["from"] == "me@gmail.com"
+
+
+def test_polling_without_any_mailbox_credentials_refuses_to_start():
+    got = _load({"MAIL_OUT": "resend", "MAIL_IN": "imap",
+                 "RESEND_API_KEY": "re_x", "FROM_EMAIL": "c@example.com"})
+    assert "IMAP_USER" in got.get("error", "")
+
+
+@pytest.mark.parametrize(
+    "env", [{"MAIL_OUT": "carrier-pigeon"}, {"MAIL_IN": "carrier-pigeon"},
+            {"MAIL_TRANSPORT": "carrier-pigeon"}],
+)
+def test_an_unknown_transport_is_refused_at_startup(env):
+    got = _load(dict(SMTP_ENV, **env))
+    assert "must be" in got.get("error", "")

@@ -74,11 +74,24 @@ def main() -> None:
     env = read_env()
     key = env.get("RESEND_API_KEY", "")
     if not key:
-        die("RESEND_API_KEY is empty in .env. This script is for the domain path; "
-            "the mailbox path needs no webhook.")
+        die("RESEND_API_KEY is empty in .env. This script sets up the webhook, "
+            "so it is only for MAIL_IN=resend; polling over IMAP needs none.")
 
     return_domain = env.get("RETURN_EMAIL", "").partition("@")[2].lower()
 
+    # Resend hands every account a managed receiving domain. It has no DNS to
+    # get wrong and never appears under /domains, so the capability check below
+    # would only produce a confusing warning about a domain you do not own.
+    if return_domain.endswith(".resend.app"):
+        print(f"Receiving on Resend's managed domain {return_domain} — "
+              "nothing to verify.")
+    else:
+        check_domain(key, return_domain)
+
+    register_webhook(key, base, env)
+
+
+def check_domain(key: str, return_domain: str) -> None:
     print("Checking your Resend domain…")
     domains = api(key, "GET", "/domains").get("data", [])
     match = next(
@@ -104,6 +117,8 @@ def main() -> None:
                 "not always stick), then run this again."
             )
 
+
+def register_webhook(key: str, base: str, env: dict) -> None:
     endpoint = f"{base}/webhook/inbound"
     print(f"Registering webhook for {endpoint} …")
 

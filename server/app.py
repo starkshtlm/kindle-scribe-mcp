@@ -1,10 +1,13 @@
-"""scribe-bridge: relay documents between Claude and a Kindle Scribe via Resend.
+"""scribe-bridge: relay documents between Claude and a Kindle Scribe by email.
 
 Outbound: POST /send (or MCP-tool send_to_scribe) -> emails a PDF to the
-          user's @kindle.com address.
-Inbound:  Resend fires POST /webhook/inbound when Amazon's "shared from
-          Kindle" export mail arrives; we fetch the mail body, extract the
-          download link, pull the annotated PDF and store it in INBOX_DIR.
+          user's @kindle.com address, over SMTP (MAIL_OUT=smtp) or Resend
+          (MAIL_OUT=resend).
+Inbound:  Amazon's "shared from Kindle" export mail arrives either in a mailbox
+          we poll over IMAP (MAIL_IN=imap) or through Resend's webhook
+          (MAIL_IN=resend); either way we fetch the mail, extract the download
+          link, pull the annotated PDF and store it in INBOX_DIR. Both routes
+          meet in store_document, which is the whole trust boundary.
 MCP:      Mounted at /<MCP_TOKEN>/mcp (streamable HTTP) so Claude chats and
           Claude Code can use the bridge as a connector. The token in the path
           is the auth — treat the whole URL as a secret.
@@ -46,27 +49,48 @@ def required_env(name: str, hint: str) -> str:
     return value
 
 
-# "mailbox" needs nothing but an existing email account: SMTP out, IMAP in, no
-# domain, no DNS, no webhook. "resend" is the domain-backed path with instant
-# push delivery. Both are first class; only the setup effort differs.
-MAIL_TRANSPORT = os.environ.get("MAIL_TRANSPORT", "resend").strip().lower()
-if MAIL_TRANSPORT not in ("mailbox", "resend"):
+# The two directions are configured independently, because what they cost is
+# not the same. Sending from a domain you do not own is an open relay and every
+# provider refuses it, so outbound is either your own mailbox or your own
+# verified domain. Receiving only needs *somewhere* the mail lands: a mailbox
+# to poll, or a webhook — and Resend's free *.resend.app receiving address
+# needs no domain of yours at all, just a publicly reachable bridge.
+#
+#   MAIL_OUT=smtp    send from a mailbox you already have (app password)
+#   MAIL_OUT=resend  send from your Resend-verified domain
+#   MAIL_IN=imap     poll that mailbox; nothing has to be publicly reachable
+#   MAIL_IN=resend   Resend's webhook, on your domain or on *.resend.app
+#
+# MAIL_TRANSPORT is the older single switch and still works: "mailbox" means
+# smtp+imap, "resend" means resend+resend.
+LEGACY_TRANSPORTS = {"mailbox": ("smtp", "imap"), "resend": ("resend", "resend")}
+MAIL_TRANSPORT = os.environ.get("MAIL_TRANSPORT", "").strip().lower()
+if MAIL_TRANSPORT and MAIL_TRANSPORT not in LEGACY_TRANSPORTS:
     raise SystemExit("MAIL_TRANSPORT must be 'mailbox' or 'resend'.")
+_out_default, _in_default = LEGACY_TRANSPORTS.get(MAIL_TRANSPORT, ("resend", "resend"))
+MAIL_OUT = os.environ.get("MAIL_OUT", "").strip().lower() or _out_default
+MAIL_IN = os.environ.get("MAIL_IN", "").strip().lower() or _in_default
+if MAIL_OUT not in ("smtp", "resend"):
+    raise SystemExit("MAIL_OUT must be 'smtp' or 'resend'.")
+if MAIL_IN not in ("imap", "resend"):
+    raise SystemExit("MAIL_IN must be 'imap' or 'resend'.")
 
 KINDLE_EMAIL = required_env("KINDLE_EMAIL", "your device's @kindle.com address")
 BRIDGE_TOKEN = required_env("BRIDGE_TOKEN", "generate with: openssl rand -hex 32")
 
-if MAIL_TRANSPORT == "resend":
-    RESEND_API_KEY = required_env(
-        "RESEND_API_KEY", "create one at resend.com/api-keys"
-    )
-    FROM_EMAIL = required_env(
-        "FROM_EMAIL", "sender on your Resend-verified domain"
-    )
+# Receiving needs the key too: the webhook carries only metadata, so the mail
+# itself is fetched from Resend's receiving API afterwards.
+RESEND_API_KEY = (
+    required_env("RESEND_API_KEY", "create one at resend.com/api-keys")
+    if "resend" in (MAIL_OUT, MAIL_IN)
+    else ""
+)
+
+if MAIL_OUT == "resend":
+    FROM_EMAIL = required_env("FROM_EMAIL", "sender on your Resend-verified domain")
     SMTP_HOST = SMTP_USER = SMTP_PASSWORD = ""
     SMTP_PORT = 0
 else:
-    RESEND_API_KEY = ""
     SMTP_HOST = required_env("SMTP_HOST", "e.g. smtp.gmail.com")
     SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
     SMTP_USER = required_env("SMTP_USER", "the mailbox address you send from")
@@ -75,6 +99,16 @@ else:
     )
     # Amazon matches the approved-sender list on this address.
     FROM_EMAIL = os.environ.get("FROM_EMAIL", "").strip() or SMTP_USER
+
+# Polling can read a different mailbox than the one we send from; both default
+# to the SMTP credentials, which is the common case.
+IMAP_USER = os.environ.get("IMAP_USER", "").strip() or SMTP_USER
+IMAP_PASSWORD = os.environ.get("IMAP_PASSWORD", "").strip() or SMTP_PASSWORD
+if MAIL_IN == "imap" and not IMAP_USER:
+    raise SystemExit(
+        "MAIL_IN=imap needs a mailbox to poll — set IMAP_USER and IMAP_PASSWORD "
+        "(or SMTP_USER/SMTP_PASSWORD when they are the same account)."
+    )
 WEBHOOK_SECRET = os.environ.get("RESEND_WEBHOOK_SECRET", "")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
 MCP_TOKEN = os.environ.get("MCP_TOKEN", "")
@@ -104,7 +138,7 @@ def warn_if_inbound_is_dead() -> list[str]:
             "RETURN_EMAIL is not set — every incoming document will be rejected. "
             "Set it to the address you share to from the Scribe."
         )
-    if MAIL_TRANSPORT == "resend" and not os.environ.get(
+    if MAIL_IN == "resend" and not os.environ.get(
         "RESEND_WEBHOOK_SECRET", ""
     ).strip():
         problems.append(
@@ -112,7 +146,7 @@ def warn_if_inbound_is_dead() -> list[str]:
             "document can arrive. Register the webhook in Resend and paste its "
             "signing secret here."
         )
-    if MAIL_TRANSPORT == "mailbox" and not os.environ.get("IMAP_HOST", "").strip():
+    if MAIL_IN == "imap" and not os.environ.get("IMAP_HOST", "").strip():
         problems.append(
             "IMAP_HOST is not set — nothing polls for returning documents. Set it "
             "to your provider's IMAP server, e.g. imap.gmail.com."
@@ -419,7 +453,7 @@ async def send_pdf(filename: str, data: bytes) -> str:
     """Deliver a PDF to the Kindle over whichever transport is configured."""
     if len(data) > MAX_DOC_BYTES:
         raise ValueError("document too large for Kindle (max ~45 MB)")
-    if MAIL_TRANSPORT == "mailbox":
+    if MAIL_OUT == "smtp":
         return await asyncio.to_thread(smtp_send_pdf, filename, data)
     return await resend_send_pdf(filename, data)
 
@@ -784,7 +818,7 @@ if MCP_TOKEN:
 @contextlib.asynccontextmanager
 async def mailbox_poller():
     """Run the IMAP poll loop for the lifetime of the app, when configured."""
-    if MAIL_TRANSPORT != "mailbox":
+    if MAIL_IN != "imap":
         yield
         return
     import mailbox as mailbox_transport
@@ -792,7 +826,7 @@ async def mailbox_poller():
     task = asyncio.create_task(
         mailbox_transport.poll_forever(
             store_document, already_processed, mark_processed,
-            SMTP_USER, SMTP_PASSWORD,
+            IMAP_USER, IMAP_PASSWORD,
         )
     )
     try:
@@ -994,6 +1028,10 @@ async def store_document(email: dict) -> dict:
 
 @app.post("/webhook/inbound")
 async def inbound_webhook(request: Request):
+    # Nothing should be able to push documents in through a door this
+    # deployment does not use.
+    if MAIL_IN != "resend":
+        raise HTTPException(status_code=404)
     body = await request.body()
     # Fail closed: without a signing secret we cannot tell Resend from anyone.
     if not WEBHOOK_SECRET:

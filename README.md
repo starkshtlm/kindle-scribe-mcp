@@ -68,27 +68,41 @@ Then add a custom connector under Settings → Connectors with
 `https://<your-host>/<MCP_TOKEN>/mcp`. The token in the path is the only
 credential — treat the whole URL as a password.
 
-### Production setup: your own sending domain
+### The three ways mail can move
 
-The mailbox path polls your inbox once a minute and stores an app password. If
-you would rather have instant push delivery, a sender on your own domain, or
-you use a Google Workspace account (which cannot issue app passwords), run
-`./setup.sh` and pick the **domain** option. It uses
-[Resend](https://resend.com) — free tier covers 3,000 mails a month — and needs
-a domain with DNS access.
+Sending and receiving are configured separately, because they do not cost the
+same. Sending to your Kindle from a domain you do not own is an open relay and
+no provider allows it, so outbound is always an address you control. Receiving
+only needs somewhere the mail lands.
 
-Once the bridge is publicly reachable, finish it in one command:
+| | `MAIL_OUT` / `MAIL_IN` | Domain + DNS | Public HTTPS | Documents return |
+|---|---|---|---|---|
+| **Mailbox** (quick start) | `smtp` / `imap` | No | No | within a minute |
+| **Hybrid** | `smtp` / `resend` | No | Yes | instantly |
+| **Domain** | `resend` / `resend` | Yes | Yes | instantly |
+
+**Hybrid** is worth knowing about: [Resend](https://resend.com) gives every
+account a free `<id>.resend.app` receiving address, so you get push delivery
+without owning a domain — the bridge just has to be reachable for the webhook.
+Sending still goes through your own mailbox, which is also the address Amazon
+wants on its approved-sender list.
+
+**Domain** is the one to pick if you want a sender on your own domain, or if
+you have a Google Workspace account and therefore cannot issue an app password.
+
+For either Resend path, once the bridge is publicly reachable:
 
 ```bash
 ./scribe-finish https://bridge.yourdomain.com
 ```
 
-That creates the inbound webhook through Resend's API, writes its signing
-secret into `.env`, and verifies that your domain has both sending *and*
-receiving enabled — the setting people miss most often.
+That creates the inbound webhook through Resend's API and writes its signing
+secret into `.env`. On a domain of your own it also verifies that both sending
+*and* receiving are enabled — the setting people miss most often.
 
-Switching between the two is one line in `.env` plus a restart. Nothing about
-your stored documents changes.
+Switching between them is two lines in `.env` plus a restart. Nothing about
+your stored documents changes. (`MAIL_TRANSPORT=mailbox|resend` from earlier
+versions still works and maps onto the first and third rows.)
 
 Optionally install the plugin for `/scribe-send` and `/scribe-fetch` slash
 commands in Claude Code:
@@ -137,11 +151,13 @@ headings — handwritten references like "see 2.3" then land unambiguously.
 ## Configuration
 
 All settings are environment variables; see [`.env.example`](.env.example).
-Notable ones: `MCP_ALLOWED_HOSTS` (host allowlist for the MCP transport, `*`
-disables the check), `RETURN_EMAIL` (the only address whose mail is processed — required),
-`INBOX_RETENTION_DAYS` (auto-delete stored documents, 30 days by default),
-`RESEND_WEBHOOK_SECRET` (required to receive anything — the webhook answers 503
-until it is set).
+Notable ones: `MAIL_OUT`/`MAIL_IN` (the table above), `MCP_ALLOWED_HOSTS` (host
+allowlist for the MCP transport, `*` disables the check), `RETURN_EMAIL` (the
+only address whose mail is processed — required), `INBOX_RETENTION_DAYS`
+(auto-delete stored documents, 30 days by default), `RESEND_WEBHOOK_SECRET`
+(required with `MAIL_IN=resend` — the webhook answers 503 until it is set), and
+`IMAP_USER`/`IMAP_PASSWORD` (only when the mailbox you poll is not the one you
+send from).
 
 ## How it works, and what it cannot do
 

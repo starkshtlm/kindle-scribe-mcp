@@ -42,7 +42,7 @@ jobs:
 
       - name: Start container in mailbox mode (no Resend credentials at all)
         run: |
-          docker run -d --name mailbox-bridge \
+          docker run -d --name mailbox-bridge -p 127.0.0.1:8378:8377 \
             -e MAIL_TRANSPORT=mailbox \
             -e KINDLE_EMAIL=ci@kindle.com \
             -e RETURN_EMAIL=ci@example.com \
@@ -54,7 +54,29 @@ jobs:
           docker logs mailbox-bridge
           docker ps --filter name=mailbox-bridge --filter status=running \
             --format '{{.Names}}' | grep -q mailbox-bridge
+          # The webhook is a door this deployment does not use; nothing should
+          # be able to push documents in through it.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            http://127.0.0.1:8378/webhook/inbound -d '{}')
+          test "$code" = "404"
           docker rm -f mailbox-bridge
+
+      - name: Start container in hybrid mode (SMTP out, Resend webhook in)
+        run: |
+          docker run -d --name hybrid-bridge \
+            -e MAIL_OUT=smtp -e MAIL_IN=resend \
+            -e KINDLE_EMAIL=ci@kindle.com \
+            -e RETURN_EMAIL=scribe@cool-hedgehog.resend.app \
+            -e BRIDGE_TOKEN=citoken \
+            -e RESEND_API_KEY=re_ci_placeholder \
+            -e SMTP_HOST=smtp.example.com -e SMTP_USER=ci@example.com \
+            -e SMTP_PASSWORD=x \
+            kindle-scribe-mcp:ci
+          sleep 8
+          docker logs hybrid-bridge
+          docker ps --filter name=hybrid-bridge --filter status=running \
+            --format '{{.Names}}' | grep -q hybrid-bridge
+          docker rm -f hybrid-bridge
 
       - name: Start container
         run: |

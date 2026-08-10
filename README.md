@@ -8,11 +8,11 @@ terminal — because the bridge is an MCP server.
 
 ```
    Claude                     your server                    Amazon
-┌────────────┐   send_to_    ┌──────────────┐   Resend    ┌─────────┐
-│ chat / CLI │──scribe──────▶│  PDF render  │────mail────▶│ @kindle │──▶ Scribe
+┌────────────┐   send_to_    ┌──────────────┐  SMTP or    ┌─────────┐
+│ chat / CLI │──scribe──────▶│  PDF render  │──Resend────▶│ @kindle │──▶ Scribe
 │            │               │              │             └─────────┘   (read +
-│            │  get_         │   inbox   ◀──│◀── webhook ◀── "shared     stylus)
-│            │◀─annotated────│  page images │    (Resend)   from Kindle"    │
+│            │  get_         │   inbox   ◀──│◀─ IMAP poll ◀─ "shared     stylus)
+│            │◀─annotated────│  page images │   or webhook   from Kindle"   │
 └────────────┘               └──────────────┘                              │
         ▲                                          Share → Send by email ──┘
         └── reads your handwriting with vision
@@ -68,7 +68,7 @@ Then add a custom connector under Settings → Connectors with
 `https://<your-host>/<MCP_TOKEN>/mcp`. The token in the path is the only
 credential — treat the whole URL as a password.
 
-### The three ways mail can move
+## The three ways mail can move
 
 Sending and receiving are configured separately, because they do not cost the
 same. Sending to your Kindle from a domain you do not own is an open relay and
@@ -85,7 +85,8 @@ only needs somewhere the mail lands.
 account a free `<id>.resend.app` receiving address, so you get push delivery
 without owning a domain — the bridge just has to be reachable for the webhook.
 Sending still goes through your own mailbox, which is also the address Amazon
-wants on its approved-sender list.
+wants on its approved-sender list. Find the address under Emails → Receiving in
+the Resend dashboard; it is not exposed through their API.
 
 **Domain** is the one to pick if you want a sender on your own domain, or if
 you have a Google Workspace account and therefore cannot issue an app password.
@@ -171,8 +172,10 @@ Handwriting is read by Claude's vision, not OCR, so context and layout
 (arrows, strike-throughs, circled words) are interpreted rather than just
 transcribed.
 
-Documents are stored on your own server. Nothing goes anywhere except Resend
-(mail delivery) and Amazon (your own Kindle account).
+Documents are stored on your own server. Nothing goes anywhere except your mail
+provider and Amazon (your own Kindle account) — and on the quick-start path
+that mail provider is the one you already use, so Resend is not involved at
+all.
 
 ## Troubleshooting
 

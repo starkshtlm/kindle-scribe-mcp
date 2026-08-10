@@ -12,7 +12,7 @@ How it works underneath: documents go out over Send-to-Kindle email as PDFs with
 
 It's free and self-hosted (MIT): https://github.com/starkshtlm/kindle-scribe-mcp
 
-You need a Scribe, a free Resend account and a domain. Setup is about 30 minutes, mostly waiting for DNS. Happy to help anyone who gets stuck.
+You need a Scribe, an email account you already have (Gmail, iCloud, Fastmail — anything that issues an app password) and Docker. No domain, no DNS, no webhook: setup is about five minutes, and the longest step is adding your own address to Amazon's approved-sender list. Happy to help anyone who gets stuck.
 
 ---
 
@@ -22,7 +22,7 @@ You need a Scribe, a free Resend account and a domain. Setup is about 30 minutes
 
 Sharing a project that closes the loop between an LLM and the Scribe's pen.
 
-Outbound uses Send-to-Kindle email with PDFs formatted for the device — 3:4 page ratio so it fills the screen, wide right margin as writing space, generous leading. Inbound uses the Scribe's built-in share-by-email: a webhook catches Amazon's export notification, follows the download link before it expires, and stores the annotated PDF. The handwriting is then read by the model's vision rather than OCR, so marginalia, strike-throughs and arrows are interpreted in context.
+Outbound uses Send-to-Kindle email with PDFs formatted for the device — 3:4 page ratio so it fills the screen, wide right margin as writing space, generous leading. Inbound uses the Scribe's built-in share-by-email: the bridge catches Amazon's export notification — by polling your own mailbox over IMAP, or through a webhook if you would rather have push — follows the download link before it expires, and stores the annotated PDF. The handwriting is then read by the model's vision rather than OCR, so marginalia, strike-throughs and arrows are interpreted in context.
 
 Notes for anyone attempting something similar:
 
@@ -30,10 +30,11 @@ Notes for anyone attempting something similar:
 - Never use `convert` as the subject line; the reflow it triggers disables page annotation
 - EPUB/DOCX only allow sticky notes, not writing on the page
 - Amazon's export links expire after 7 days, so fetch them on arrival
+- Sending from a VPS often needs SMTP port 587 rather than 465 — hosts block 465 routinely, and the only symptom is a silent timeout
 
 Self-hosted, MIT licensed: https://github.com/starkshtlm/kindle-scribe-mcp
 
-Requires a free Resend account for mail in both directions and a domain for the receiving address. Documents stay on your own server.
+Runs on an ordinary mailbox over SMTP and IMAP, so no domain, DNS or mail provider account is required; a Resend-backed setup is available if you want push delivery or a sender on your own domain. Documents stay on your own server.
 
 ---
 

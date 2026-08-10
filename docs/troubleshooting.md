@@ -6,10 +6,13 @@ before assuming your setup is broken.
 ## Sending
 
 **The document never appears on the Scribe.**
-Check Resend's dashboard (Emails → Sending). `Delivered` means Amazon accepted
-it — then the usual cause is that `FROM_EMAIL` is not on Amazon's *Approved
-Personal Document E-mail List*, or the device is off wifi. Amazon silently
-drops mail from unapproved senders.
+First find out whether the mail left. With `MAIL_OUT=resend`, check Resend's
+dashboard (Emails → Sending); with `MAIL_OUT=smtp`, look in your own Sent
+folder — providers file SMTP submissions there. If it left, the usual cause is
+that `FROM_EMAIL` is not on Amazon's *Approved Personal Document E-mail List*,
+or the device is off wifi. Amazon silently drops mail from unapproved senders:
+there is no bounce, so an empty Sent folder and a delivered mail look the same
+from the Scribe.
 
 **The document arrives but you cannot write on the page.**
 It was not sent as a PDF, or it got converted. Two rules: send **PDF only**
@@ -69,13 +72,22 @@ transport that is your own address). Rejections are logged and pushed to ntfy.
 That is the poll interval. Lower `IMAP_POLL_SECONDS` if you want, but every
 poll is a login — a minute is a reasonable balance.
 
-## Receiving
+## Receiving through Resend (`MAIL_IN=resend`)
+
+**You cannot find your `<id>.resend.app` receiving address.**
+Resend dashboard → **Emails** → **Receiving** → *Receiving address*. The local
+part is yours to choose, the domain is fixed. It is not in the API: `GET
+/domains` returns only domains you added yourself, and there is no endpoint
+that lists the managed one, so the dashboard is the only place it exists.
+`./scribe-finish` recognises the address and skips the domain checks, which do
+not apply to it.
 
 **You shared from the Scribe but nothing arrives.**
 1. Resend → Domains → your domain: is **Enable Receiving** actually on? The
    toggle in the *add domain* form does not always persist — you often have to
    switch it on again from the domain page afterwards. This is the single most
-   common setup mistake.
+   common setup mistake. (Not applicable on `<id>.resend.app`, which receives
+   out of the box.)
 2. Resend → Emails → **Receiving** tab: is the mail there? If yes, the problem
    is your webhook, not the mail path. Resend stores inbound mail for 30 days,
    so nothing is lost while you fix it.

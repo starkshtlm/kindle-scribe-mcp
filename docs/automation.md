@@ -4,9 +4,9 @@ By default you ask Claude to read your feedback. With a scheduled task, the
 interpretation is simply waiting for you: new arrivals are picked up, the
 handwriting is read, and a summary is pushed to your phone.
 
-This works on either mail transport, because documents are paired with their source — a returning
-document arrives with the text it was made from, so the model can say *what
-changed*, not just what it sees.
+This works whichever way your mail is configured, because documents are paired
+with their source — a returning document arrives with the text it was made
+from, so the model can say *what changed*, not just what it sees.
 
 ## Set it up
 
@@ -65,8 +65,9 @@ before the first scheduled run — in Claude Code, add them to
 
 Note what this means: `get_annotated` brings document content into an
 unattended agent. The inbound checks make planting a document hard — mail must
-be addressed to your return address and be DKIM/SPF-proven to come from Amazon
-— but the task prompt above still pins the agent to this one connector, which
+be addressed to your return address, and a receiving server must have verified
+that it really came from Amazon — but the task prompt above still pins the
+agent to this one connector, which
 is what keeps a hostile document from reaching anything else. Do not widen it.
 
 `send_to_scribe` is deliberately left out: nothing should be mailed to your

@@ -591,3 +591,19 @@ def test_a_server_refusing_starttls_is_not_used_in_the_clear(monkeypatch):
     monkeypatch.setattr(app, "SMTP_PORT", 587)
     with pytest.raises(RuntimeError, match="clear"):
         app.smtp_connection()
+
+
+def test_every_setting_the_code_reads_is_documented():
+    """Documentation drifts silently; this makes it fail loudly instead. A new
+    env var must appear in .env.example — as a key or in the prose above it —
+    before it can be merged."""
+    import re as _re
+    from pathlib import Path
+
+    server = Path(app.__file__).resolve().parent
+    code = (server / "app.py").read_text() + (server / "mailbox.py").read_text()
+    used = set(_re.findall(r'(?:os\.environ\.get|required_env)\(\s*"([A-Z_]+)"', code))
+    used.discard("PATH")  # inherited, not a setting of ours
+    documented = (server.parent / ".env.example").read_text()
+    missing = sorted(name for name in used if name not in documented)
+    assert not missing, f"undocumented settings: {missing}"

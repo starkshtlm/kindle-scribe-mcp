@@ -10,7 +10,8 @@ will agree on a private channel.
 ## Threat model
 
 The bridge sits between three parties you do not control: **inbound email**
-(anyone can send to your receiving domain), **Amazon's servers** (whose
+(anyone can write to the address you receive on, whichever route it takes),
+**Amazon's servers** (whose
 download links you follow), and **the model** (which reads whatever ends up in
 your inbox). The design assumptions:
 
@@ -80,10 +81,19 @@ with any new finding.
   bump it when you rebuild.
 - **DNS rebinding between validation and connection** is theoretically
   possible. The Amazon-host allowlist on the first hop makes it impractical.
+- **An app password is not scoped to one folder.** With `MAIL_OUT=smtp` and
+  `MAIL_IN=imap` the bridge holds a credential that can read your entire
+  mailbox, and it sits in `.env` in plain text like every other secret here.
+  Nothing in the code reads anything but unread mail from Amazon — but the
+  permission is broader than the use. Point `IMAP_USER`/`IMAP_PASSWORD` at a
+  dedicated address if that matters to you, or take a Resend path, where the
+  bridge never holds a mailbox credential at all.
 
 ## Deployment checklist
 
-- [ ] `RESEND_WEBHOOK_SECRET` set — the webhook refuses to run without it
+- [ ] `RESEND_WEBHOOK_SECRET` set when `MAIL_IN=resend` — the webhook refuses
+      to run without it (and answers 404 when `MAIL_IN=imap`, so no unused door
+      is left open)
 - [ ] `RETURN_EMAIL` set to the address you share to from the Scribe
 - [ ] `NTFY_TOPIC` set, so rejected mail is visible immediately
 - [ ] `INBOX_RETENTION_DAYS` matches how long you want documents kept

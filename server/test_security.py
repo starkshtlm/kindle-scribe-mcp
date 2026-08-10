@@ -537,3 +537,57 @@ def test_polling_without_any_mailbox_credentials_refuses_to_start():
 def test_an_unknown_transport_is_refused_at_startup(env):
     got = _load(dict(SMTP_ENV, **env))
     assert "must be" in got.get("error", "")
+
+
+# --- SMTP submission --------------------------------------------------------
+
+
+def test_starttls_is_used_on_the_submission_port(monkeypatch):
+    """465 is TLS from the first byte, 587 upgrades. Hosting providers block
+    465 routinely (Hetzner does), so only supporting it means sending times out
+    with no explanation on the machines people deploy to."""
+    calls = []
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            calls.append(("plain", host, port))
+
+        def starttls(self):
+            calls.append(("starttls",))
+
+        def close(self):
+            pass
+
+    def fake_ssl(host, port, timeout=None):
+        calls.append(("ssl", host, port))
+        return object()
+
+    monkeypatch.setattr(app.smtplib, "SMTP", FakeSMTP)
+    monkeypatch.setattr(app.smtplib, "SMTP_SSL", fake_ssl)
+    monkeypatch.setattr(app, "SMTP_HOST", "smtp.example.com")
+
+    monkeypatch.setattr(app, "SMTP_PORT", 465)
+    app.smtp_connection()
+    assert calls == [("ssl", "smtp.example.com", 465)]
+
+    calls.clear()
+    monkeypatch.setattr(app, "SMTP_PORT", 587)
+    app.smtp_connection()
+    assert calls == [("plain", "smtp.example.com", 587), ("starttls",)]
+
+
+def test_a_server_refusing_starttls_is_not_used_in_the_clear(monkeypatch):
+    class RefusingSMTP:
+        def __init__(self, host, port, timeout=None):
+            pass
+
+        def starttls(self):
+            raise app.smtplib.SMTPException("not supported")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(app.smtplib, "SMTP", RefusingSMTP)
+    monkeypatch.setattr(app, "SMTP_PORT", 587)
+    with pytest.raises(RuntimeError, match="clear"):
+        app.smtp_connection()

@@ -47,6 +47,18 @@ If your provider does not stamp `Authentication-Results`, or a forwarding rule
 strips it, genuine mail is refused too. Forward to a mailbox that stamps it
 (Gmail, iCloud and Fastmail all do), or use the Resend path.
 
+**Sending hangs and then times out — on a VPS, but not on your laptop.**
+Your host is blocking the submission port. Hetzner blocks outbound 465 and 25
+while leaving 587 open, and it is far from alone; the only symptom is a
+`send_to_scribe` that stalls for minutes and gives up. Set `SMTP_PORT=587` and
+the bridge upgrades the connection with STARTTLS instead. Verify from the
+machine itself before guessing:
+
+```bash
+timeout 8 bash -c 'cat < /dev/null > /dev/tcp/smtp.gmail.com/465' && echo open
+timeout 8 bash -c 'cat < /dev/null > /dev/tcp/smtp.gmail.com/587' && echo open
+```
+
 **Documents send fine but nothing comes back.**
 The bridge only looks at unread mail *from Amazon* in `IMAP_FOLDER`. Check that
 a rule or filter is not moving Amazon's mail out of the inbox before the poll

@@ -443,10 +443,34 @@ def smtp_send_pdf(filename: str, data: bytes) -> str:
     message.add_attachment(
         data, maintype="application", subtype="pdf", filename=filename
     )
-    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=120) as smtp:
+    with smtp_connection() as smtp:
         smtp.login(SMTP_USER, SMTP_PASSWORD)
         smtp.send_message(message)
     return "smtp"
+
+
+def smtp_connection() -> smtplib.SMTP:
+    """Open an encrypted submission connection.
+
+    Port 465 speaks TLS from the first byte; 587 starts in the clear and
+    upgrades with STARTTLS. Supporting only 465 is not a detail: hosting
+    providers routinely block it (Hetzner blocks 465 and 25 outbound while
+    leaving 587 open), so sending would time out with no explanation on the
+    very machines people deploy this to.
+    """
+    if SMTP_PORT == 465:
+        return smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=120)
+    smtp = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=120)
+    try:
+        smtp.starttls()
+    except smtplib.SMTPException:
+        smtp.close()
+        raise RuntimeError(
+            f"{SMTP_HOST}:{SMTP_PORT} refused STARTTLS, so the password would "
+            "cross the network in the clear. Use port 465, or a host that "
+            "offers STARTTLS on 587."
+        ) from None
+    return smtp
 
 
 async def send_pdf(filename: str, data: bytes) -> str:

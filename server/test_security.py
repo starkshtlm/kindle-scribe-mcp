@@ -1053,3 +1053,35 @@ def test_the_token_is_never_printed():
     cli = _cli()
     assert cli.redact("https://host/supersecret/mcp") == "https://host/<MCP_TOKEN>/mcp"
     assert "supersecret" not in cli.redact("https://host/supersecret/mcp")
+
+
+def test_the_lock_satisfies_the_ranges_it_was_generated_from():
+    """Bumping a range without regenerating the lock does nothing at all: the
+    image installs the lock, so the range would move while the shipped version
+    stayed put. This is the check that noticed."""
+    import re as _re
+    root = _repo_root()
+
+    def parts(version):
+        return tuple(int(p) if p.isdigit() else 0
+                     for p in _re.split(r"[.\-+]", version))
+
+    locked = dict(
+        line.split("==", 1) for line in
+        (root / "server" / "requirements.lock").read_text().splitlines()
+        if "==" in line and not line.startswith("#")
+    )
+    locked = {name.lower(): version.strip() for name, version in locked.items()}
+
+    for line in (root / "server" / "requirements.txt").read_text().splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        name = _re.split(r"[><=\[]", line, 1)[0].strip().lower()
+        floor = _re.search(r">=\s*([0-9][^,\s]*)", line)
+        assert name in locked, f"{name} is missing from requirements.lock"
+        if floor:
+            have, want = parts(locked[name]), parts(floor.group(1))
+            assert have >= want, (
+                f"{name}: lock has {locked[name]} but requirements.txt asks for "
+                f">={floor.group(1)} — regenerate server/requirements.lock"
+            )

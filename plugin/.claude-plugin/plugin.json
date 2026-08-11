@@ -1,7 +1,7 @@
 {
   "name": "kindle-scribe",
   "description": "Send documents to a Kindle Scribe, annotate them by hand, and read the handwriting back into Claude.",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "author": { "name": "kindle-scribe-mcp contributors" },
   "homepage": "https://github.com/starkshtlm/kindle-scribe-mcp",
   "license": "MIT"

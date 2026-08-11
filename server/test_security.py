@@ -1099,3 +1099,15 @@ def test_the_lock_names_the_python_it_was_resolved_against():
         f"Dockerfile is on python {base} but the lock header says otherwise — "
         "regenerate server/requirements.lock against the new base image"
     )
+
+
+def test_the_readme_only_promises_documents_that_exist():
+    """The front page is now a map into docs/; a moved page would leave a new
+    reader at a 404 on their first click."""
+    import re as _re
+    root = _repo_root()
+    readme = (root / "README.md").read_text()
+    targets = [t for _, t in _re.findall(r"\[([^\]]+)\]\(([^)]+)\)", readme)
+               if not t.startswith(("http", "mailto:", "#"))]
+    missing = [t for t in targets if not (root / t.partition("#")[0]).exists()]
+    assert not missing, f"README links to files that do not exist: {missing}"

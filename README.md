@@ -1,215 +1,136 @@
 # kindle-scribe-mcp
 
-Send documents from Claude to a Kindle Scribe, annotate them by hand with the
-stylus, share them back, and have Claude read your handwriting and act on it.
-
-Works from any Claude surface — a chat on your phone, Claude Code in the
-terminal — because the bridge is an MCP server.
+Ask your assistant for a draft. Read it on a Kindle Scribe, in an armchair, and
+mark it up with the pen. Tap share. The assistant reads your handwriting and
+makes the edits.
 
 ```
-   Claude                     your server                    Amazon
-┌────────────┐   send_to_    ┌──────────────┐  SMTP or    ┌─────────┐
-│ chat / CLI │──scribe──────▶│  PDF render  │──Resend────▶│ @kindle │──▶ Scribe
-│            │               │              │             └─────────┘   (read +
-│            │  get_         │   inbox   ◀──│◀─ IMAP poll ◀─ "shared     stylus)
-│            │◀─annotated────│  page images │   or webhook   from Kindle"   │
-└────────────┘               └──────────────┘                              │
-        ▲                                          Share → Send by email ──┘
-        └── reads your handwriting with vision
+   your assistant            your server                    Amazon
+┌────────────────┐  send_to_ ┌──────────────┐  SMTP or    ┌─────────┐
+│ Claude · Codex │──scribe──▶│  PDF render  │──Resend────▶│ @kindle │──▶ Scribe
+│ ChatGPT · any  │           │              │             └─────────┘  (read +
+│  MCP client    │  get_     │   inbox   ◀──│◀─ IMAP poll ◀─ "shared    stylus)
+│                │◀─annotated│  page images │   or webhook   from Kindle" │
+└────────────────┘           └──────────────┘                            │
+        ▲                                        Share → Send by email ──┘
+        └── reads the marks, not just the words
 ```
 
-## What you need
+## The part that surprises people
 
-- A **Kindle Scribe** (or any Kindle that supports writing on PDFs)
-- An **email account you already have** that can issue an app password —
-  Gmail, iCloud, Fastmail or your own domain. Not Outlook.com or Google
-  Workspace; both require OAuth now (see docs/troubleshooting.md)
-- Docker
+It reads *layout*. A strike-through means delete. An arrow from the margin
+means insert here. A circled word means that word, not the sentence. Cross out
+a wrong number, write the right one beside it, and the correction lands where
+you meant it — you never explain the notation, because vision reads the page
+the way a colleague would.
 
-That is it. No domain, no DNS, no webhook. **About five minutes.**
+That is also why the outgoing PDF is shaped the way it is: a 3:4 page matching
+the Scribe's screen, a wide right margin as writing room, generous leading.
+Number the headings and a scrawled "see 2.3" is unambiguous on the way back.
 
 ## Quick start
+
+About five minutes, and the longest step is Amazon's.
 
 ```bash
 git clone https://github.com/starkshtlm/kindle-scribe-mcp
 cd kindle-scribe-mcp
-./setup.sh          # pick "mailbox", paste an app password
-docker compose up -d   # pulls a published image; nothing is compiled
-./scribe doctor        # says what works before you trust it
+./setup.sh              # an email account you already have, and an app password
+docker compose up -d    # pulls a published image; nothing is compiled
+./scribe doctor         # says what works before you trust it
+./scribe connect codex  # or claude-code, or chatgpt-desktop
 ```
 
-`doctor` checks the things that otherwise fail silently — a rejected app
-password, a blocked submission port, a mailbox that never connected — and says
-which one it is. `./scribe test` then sends a document with a test id, and
-`./scribe verify` confirms that exact document came back.
+Two things the script cannot do for you:
 
-Then two things `setup.sh` cannot do for you:
+1. Add your own address to Amazon's *Approved Personal Document E-mail List*
+   (amazon.com/mycd → Preferences → Personal Document Settings). Amazon drops
+   mail from unapproved senders silently, with no bounce.
+2. Have the Scribe on wifi.
 
-1. Add your own email address to Amazon's *Approved Personal Document E-mail
-   List* (amazon.com/mycd → Preferences → Personal Document Settings)
-2. Connect your client:
-   ```bash
-   ./scribe connect claude-code
-   ```
+Then ask for something: *"send this draft to my Kindle"*. Write on it. Share it
+back by email to yourself. Ask: *"read my feedback"*.
 
-Ask Claude to send something to your Kindle. Write on it. Share it back by
-email to yourself — the bridge watches that mailbox and picks it up.
+`./scribe test` sends a document carrying a test id and `./scribe verify`
+confirms that exact document came back, so the first round trip is a check
+rather than a hope.
 
-Works with **any MCP client**, not just Claude:
+**You need:** a Kindle Scribe (or any Kindle you can write on), Docker, and an
+email account that can issue an app password — Gmail, iCloud, Fastmail or your
+own domain. Not Outlook.com or Google Workspace; both are OAuth-only now.
+
+## Works with whatever you already use
+
+The bridge is an MCP server, so it is not tied to one assistant.
 
 ```bash
 ./scribe connect claude-code
-./scribe connect codex            # also covers the Codex IDE extension
+./scribe connect codex            # also the Codex IDE extension
 ./scribe connect chatgpt-desktop  # shares Codex's configuration
 ```
 
-`connect` verifies the endpoint answers, shows the change, keeps a backup and
-leaves other servers in the file alone. See
-[`docs/clients/`](docs/clients/) for Codex and ChatGPT desktop specifics.
-Cursor, VS Code agents and anything else that speaks the protocol work too —
-point them at the same URL.
+`connect` checks the endpoint answers, shows what it will write, keeps a
+backup, and leaves other servers in the file alone. Cursor, VS Code agents and
+anything else speaking the protocol work too — point them at the same URL. See
+[`docs/clients/`](docs/clients/).
 
-### Using it from claude.ai chats
+For chats on claude.ai or a phone, the bridge needs a public HTTPS address:
+[`docs/remote-access.md`](docs/remote-access.md).
 
-Chats on claude.ai and the mobile app need the bridge on a public HTTPS URL.
-Deploy it somewhere reachable and use that hostname in the connector URL:
+## Living with it
 
-| Option | How |
-|---|---|
-| **Fly.io** (simplest) | `deploy/fly.toml.example` — HTTPS included, and Claude's connector reaches it directly |
-| **Your own VPS** | `deploy/Caddyfile.example` — two lines, automatic Let's Encrypt |
-| **Behind a firewall / broker cannot reach you** | `worker/` — a Cloudflare Worker relay, see [troubleshooting](docs/troubleshooting.md#mcp--connector) |
+**Handwritten notes work without an original.** Write in a blank notebook and
+share it — it arrives like any other document, just with nothing to compare
+against.
 
-Then add a custom connector under Settings → Connectors with
-`https://<your-host>/<MCP_TOKEN>/mcp`. The token in the path is the only
-credential — treat the whole URL as a password.
+**A returning document brings its source.** The markdown it was rendered from
+comes back with the page images, so the model can say what your handwriting
+*changes*, not merely what it sees.
 
-## The three ways mail can move
+**It can interpret without being asked.** A scheduled task picks up new
+arrivals, reads the handwriting and pushes a summary to your phone, so the
+reading is waiting for you: [`docs/automation.md`](docs/automation.md). Set
+`NTFY_TOPIC` for a push the moment something lands.
 
-Sending and receiving are configured separately, because they do not cost the
-same. Sending to your Kindle from a domain you do not own is an open relay and
-no provider allows it, so outbound is always an address you control. Receiving
-only needs somewhere the mail lands.
-
-| | `MAIL_OUT` / `MAIL_IN` | Domain + DNS | Public HTTPS | Documents return |
-|---|---|---|---|---|
-| **Mailbox** (quick start) | `smtp` / `imap` | No | No | within a minute |
-| **Hybrid** | `smtp` / `resend` | No | Yes | instantly |
-| **Domain** | `resend` / `resend` | Yes | Yes | instantly |
-
-**Hybrid** is worth knowing about: [Resend](https://resend.com) gives every
-account a free `<id>.resend.app` receiving address, so you get push delivery
-without owning a domain — the bridge just has to be reachable for the webhook.
-Sending still goes through your own mailbox, which is also the address Amazon
-wants on its approved-sender list. Find the address under Emails → Receiving in
-the Resend dashboard; it is not exposed through their API.
-
-**Domain** is the one to pick if you want a sender on your own domain, or if
-you have a Google Workspace account and therefore cannot issue an app password.
-
-For either Resend path, once the bridge is publicly reachable:
-
-```bash
-./scribe-finish https://bridge.yourdomain.com
-```
-
-That creates the inbound webhook through Resend's API and writes its signing
-secret into `.env`. On a domain of your own it also verifies that both sending
-*and* receiving are enabled — the setting people miss most often.
-
-Switching between them is two lines in `.env` plus a restart. Nothing about
-your stored documents changes. (`MAIL_TRANSPORT=mailbox|resend` from earlier
-versions still works and maps onto the first and third rows.)
-
-Optionally install the plugin for `/scribe-send` and `/scribe-fetch` slash
-commands in Claude Code:
-
-```bash
-claude plugin marketplace add starkshtlm/kindle-scribe-mcp
-claude plugin install kindle-scribe@kindle-scribe
-```
-
-## Daily use
-
-1. Ask Claude to send something: *"send this draft to my Kindle"*
-2. Read it on the Scribe, write on the pages with the stylus
-3. **Share → Send by email** to your return address (save it as a contact —
-   then it is one tap)
-4. Ask Claude: *"read my feedback"* — it fetches the pages, transcribes your
-   handwriting, and acts on it
-
-Set `NTFY_TOPIC` and subscribe in the [ntfy](https://ntfy.sh) app to get a
-phone push the moment an annotated document lands.
-
-**Handwritten notes work too.** Write in a blank notebook on the Scribe and
-share it to the same address — it arrives like any other document, just
-without an original to compare against.
-
-**Hands-free interpretation.** Because documents are paired with the text they
-were made from, a scheduled task can pick up new arrivals, read the
-handwriting and `push_summary` the result to your phone — so the interpretation
-is waiting for you instead of something you have to ask for. See
-[`docs/automation.md`](docs/automation.md).
-
-## Tools the MCP server exposes
+## The five tools
 
 | Tool | Purpose |
 |---|---|
 | `send_to_scribe(title, content_markdown)` | Render a pen-friendly PDF and mail it to the device |
 | `list_annotated(only_new)` | List documents that came back |
-| `get_annotated(item_id, start_page)` | Page images to read the handwriting, paginated — plus the original text when the document was sent from here |
-| `push_summary(message)` | Push a short summary to the user's phone via ntfy |
+| `get_annotated(item_id, start_page)` | Page images to read the handwriting, paginated — with the original text when the document was sent from here |
+| `push_summary(message)` | Push a short summary to the phone via ntfy |
 | `ack_annotated(item_id)` | Mark one as processed |
 
-The outgoing PDF uses a 3:4 page (matching the Scribe's screen), a wide right
-margin as writing room, and generous line spacing. Ask Claude to number the
-headings — handwritten references like "see 2.3" then land unambiguously.
-
-## Configuration
-
-The image is published multi-arch (amd64 and arm64) to
-`ghcr.io/starkshtlm/kindle-scribe-mcp`, with an SBOM and build provenance, and
-built from a lock file so two builds of a tag install the same versions. Pin a
-version with `SCRIBE_VERSION=v1.2.1` in `.env`; roll back by changing it and
-restarting. To build from a checkout instead:
-`docker compose -f docker-compose.dev.yml up -d --build`.
-
-`GET /status` (with `Authorization: Bearer $BRIDGE_TOKEN`) reports whether mail
-is actually flowing — whether the mailbox has ever connected, the last error,
-and where the IMAP poll has reached. `/healthz` stays a plain liveness check.
-
-All settings are environment variables; see [`.env.example`](.env.example).
-Notable ones: `MAIL_OUT`/`MAIL_IN` (the table above), `MCP_ALLOWED_HOSTS` (host
-allowlist for the MCP transport, `*` disables the check), `RETURN_EMAIL` (the
-only address whose mail is processed — required), `INBOX_RETENTION_DAYS`
-(auto-delete stored documents, 30 days by default), `RESEND_WEBHOOK_SECRET`
-(required with `MAIL_IN=resend` — the webhook answers 503 until it is set), and
-`IMAP_USER`/`IMAP_PASSWORD` (only when the mailbox you poll is not the one you
-send from).
-
-## How it works, and what it cannot do
+## What it cannot do
 
 Amazon has no API for the Scribe. Sending uses Send-to-Kindle email; returning
-uses the device's built-in share-by-email, which Amazon answers with a
-download link that the bridge follows automatically. **Exporting from the
-Scribe is therefore always a manual tap** — everything on either side of it is
-automated.
+uses the device's own share-by-email, which Amazon answers with a download link
+the bridge follows. **The share tap on the device is manual and always will
+be** — everything on either side of it is automated.
 
-Handwriting is read by Claude's vision, not OCR, so context and layout
-(arrows, strike-throughs, circled words) are interpreted rather than just
-transcribed.
+Documents stay on your own server. Nothing leaves it except to your mail
+provider and Amazon, and on the quick-start path that mail provider is the one
+you already use.
 
-Documents are stored on your own server. Nothing goes anywhere except your mail
-provider and Amazon (your own Kindle account) — and on the quick-start path
-that mail provider is the one you already use, so Resend is not involved at
-all.
+## Deeper
 
-## Troubleshooting
+- [How mail moves](docs/mail.md) — three paths, from "no domain, nothing
+  public" to your own sending domain
+- [Remote access](docs/remote-access.md) — claude.ai chats, phones, public HTTPS
+- [Configuration](docs/configuration.md) — every setting, the published image,
+  `/status`
+- [Troubleshooting](docs/troubleshooting.md) — the traps that cost the most
+  hours, each one a real failure
+- [Security](SECURITY.md) — the trust boundary, and what is not solved
+- [Automation](docs/automation.md) — hands-free interpretation
 
-See [`docs/troubleshooting.md`](docs/troubleshooting.md) — it covers the traps
-that cost the most time, including the Resend "Enable Receiving" toggle, the
-`convert` subject line, and the upstream connector bug that makes some hosts
-unreachable from Claude chats.
+Optional Claude Code plugin for `/scribe-send` and `/scribe-fetch`:
+
+```bash
+claude plugin marketplace add starkshtlm/kindle-scribe-mcp
+claude plugin install kindle-scribe@kindle-scribe
+```
 
 ## License
 

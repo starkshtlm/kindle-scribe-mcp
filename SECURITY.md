@@ -62,6 +62,13 @@ your inbox). The design assumptions:
    trigger outward-facing actions (sending mail, calling other tools) without
    the user confirming. The bundled `scribe-fetch` skill is written this way.
 
+5. **Nothing that reports on the bridge reports its secrets.** `GET /status`
+   needs `BRIDGE_TOKEN` and returns what is configured and what happened —
+   never a password, token, webhook secret or the MCP path. A test asserts
+   that. `/healthz` is unauthenticated and therefore says only that the process
+   is alive. `./scribe doctor` prints results, not credentials, and `./scribe
+   connect` redacts the token from the section it echoes before writing it.
+
 `server/test_security.py` covers these boundaries and runs in CI; extend it
 with any new finding.
 

@@ -10,6 +10,11 @@ is broken — most of this page is the explanation for a line it prints.
 Run it when something is wrong, not on a timer: each run is a login attempt,
 and a provider that sees those every few seconds locks the account.
 
+**To test the round trip rather than the configuration**, `./scribe test` sends
+a document carrying a test id and `./scribe verify` reports whether that exact
+document came back — useful when you want to know whether the loop works, not
+just whether it should.
+
 ## Sending
 
 **The document never appears on the Scribe.**

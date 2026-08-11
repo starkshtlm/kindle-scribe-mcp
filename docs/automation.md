@@ -10,10 +10,11 @@ from, so the model can say *what changed*, not just what it sees.
 
 ## Set it up
 
-Any Claude surface that can run on a schedule works. In Claude Code, ask for a
-scheduled task; on claude.ai, create one under Scheduled. Point it at this
-prompt and run it every 20–30 minutes during your waking hours (a run that
-finds nothing exits immediately and costs almost nothing):
+Anything that can run a prompt on a schedule works — in Claude Code, ask for a
+scheduled task; on claude.ai, create one under Scheduled; elsewhere, cron plus
+whatever CLI your assistant has. Point it at this prompt and run it every 20–30
+minutes during your waking hours (a run that finds nothing exits immediately
+and costs almost nothing):
 
 ```
 Check whether an annotated document has come back from the Kindle Scribe,

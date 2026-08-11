@@ -73,10 +73,26 @@ timeout 8 bash -c 'cat < /dev/null > /dev/tcp/smtp.gmail.com/587' && echo open
 ```
 
 **Documents send fine but nothing comes back.**
-The bridge only looks at unread mail *from Amazon* in `IMAP_FOLDER`. Check that
-a rule or filter is not moving Amazon's mail out of the inbox before the poll
-sees it, and that you shared to the address in `RETURN_EMAIL` (with this
+Ask the bridge before guessing:
+
+```bash
+curl -sf -H "Authorization: Bearer $BRIDGE_TOKEN" http://127.0.0.1:8377/status
+```
+
+`ever_connected: false` means the mailbox has never authenticated — check
+`IMAP_HOST` and the app password, and read `last_error`. If it has connected,
+check that a rule is not moving Amazon's mail out of `IMAP_FOLDER` before the
+poll sees it, and that you shared to the address in `RETURN_EMAIL` (with this
 transport that is your own address). Rejections are logged and pushed to ntfy.
+
+Whether the mail is read or unread makes no difference: the poll tracks its
+place by IMAP UID, so opening Amazon's mail on your phone first does not hide
+it. The bridge never changes flags — it opens the folder read-only.
+
+**A fresh install did not pick up a document I shared last week.**
+By design. A first run only looks one day back, so pointing the bridge at a
+mailbox with years of Kindle exports does not import all of them. Share the
+document again and it arrives on the next poll.
 
 **It takes up to a minute.**
 That is the poll interval. Lower `IMAP_POLL_SECONDS` if you want, but every

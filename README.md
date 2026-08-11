@@ -151,6 +151,10 @@ headings — handwritten references like "see 2.3" then land unambiguously.
 
 ## Configuration
 
+`GET /status` (with `Authorization: Bearer $BRIDGE_TOKEN`) reports whether mail
+is actually flowing — whether the mailbox has ever connected, the last error,
+and where the IMAP poll has reached. `/healthz` stays a plain liveness check.
+
 All settings are environment variables; see [`.env.example`](.env.example).
 Notable ones: `MAIL_OUT`/`MAIL_IN` (the table above), `MCP_ALLOWED_HOSTS` (host
 allowlist for the MCP transport, `*` disables the check), `RETURN_EMAIL` (the

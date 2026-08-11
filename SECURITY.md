@@ -84,8 +84,10 @@ with any new finding.
 - **An app password is not scoped to one folder.** With `MAIL_OUT=smtp` and
   `MAIL_IN=imap` the bridge holds a credential that can read your entire
   mailbox, and it sits in `.env` in plain text like every other secret here.
-  Nothing in the code reads anything but unread mail from Amazon — but the
-  permission is broader than the use. Point `IMAP_USER`/`IMAP_PASSWORD` at a
+  It only ever reads mail from Amazon, and it *cannot write*: the folder is
+  opened read-only and bodies are read with `BODY.PEEK[]`, so no flag changes
+  and nothing is deleted — but the permission the credential grants is still
+  broader than the use. Point `IMAP_USER`/`IMAP_PASSWORD` at a
   dedicated address if that matters to you, or take a Resend path, where the
   bridge never holds a mailbox credential at all.
 

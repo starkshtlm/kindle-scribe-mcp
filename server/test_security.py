@@ -18,6 +18,7 @@ os.environ.setdefault("BRIDGE_TOKEN", "testtoken")
 os.environ.setdefault("RETURN_EMAIL", "inbox@scribe.example.com")
 os.environ.setdefault("INBOX_DIR", "/tmp/scribe-test-inbox")
 
+os.environ.setdefault("MCP_TOKEN", "testmcptoken")
 os.environ.setdefault("MAIL_TRANSPORT", "resend")
 sys.path.insert(0, os.path.dirname(__file__))
 app = importlib.import_module("app")
@@ -685,3 +686,242 @@ def test_smtp_security_overrides_the_port_guess(monkeypatch, security, port, exp
     monkeypatch.setattr(app, "SMTP_SECURITY", security)
     app.smtp_connection()
     assert calls == [expected]
+
+
+# --- IMAP import ------------------------------------------------------------
+# Progress is a UID checkpoint, not the \Seen flag: a mail the user already
+# opened on their phone must still arrive, and the bridge must never change
+# what is read in someone's mailbox to keep track of its own work.
+
+
+class FakeIMAP:
+    """Enough of imaplib to exercise the poll loop without a network."""
+
+    def __init__(self, messages, uidvalidity=100):
+        self.messages = dict(messages)  # uid -> raw bytes
+        self.uidvalidity = uidvalidity
+        self.selected_readonly = None
+        self.searches = []
+        self.flag_calls = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def login(self, user, password):
+        return "OK", [b""]
+
+    def status(self, folder, what):
+        return "OK", [f"INBOX (UIDVALIDITY {self.uidvalidity})".encode()]
+
+    def select(self, folder, readonly=False):
+        self.selected_readonly = readonly
+        return "OK", [b"1"]
+
+    def store(self, *a, **k):  # pragma: no cover - must never be called
+        self.flag_calls.append(a)
+        raise AssertionError("the bridge must not change flags")
+
+    def uid(self, command, *args):
+        if command == "SEARCH":
+            criteria = args[-1]
+            self.searches.append(criteria)
+            uids = sorted(self.messages)
+            if criteria.startswith("UID "):
+                low = int(criteria.split()[1].split(":")[0])
+                hit = [u for u in uids if u >= low]
+                # An IMAP "n:*" range always matches the highest UID even when
+                # it is below n. Reproduce that, because the code must survive
+                # it: this is what caused every quiet poll to re-import.
+                if not hit and uids:
+                    hit = [uids[-1]]
+                uids = hit
+            return "OK", [" ".join(str(u) for u in uids).encode()]
+        if command == "FETCH":
+            uid = int(args[0])
+            return "OK", [(b"1 (BODY[] {1})", self.messages[uid])]
+        raise AssertionError(command)
+
+
+def _run_poll(fake, tmp_path, stored, monkeypatch, seen=None):
+    """One pass of the poll loop against a fake server."""
+    import asyncio
+    import mailbox as mb
+
+    seen = set() if seen is None else seen
+    monkeypatch.setattr(mb.imaplib, "IMAP4_SSL", lambda *a, **k: fake)
+    monkeypatch.setattr(mb, "POLL_SECONDS", 0)
+
+    class Stop(Exception):
+        pass
+
+    async def sleep(_):
+        raise Stop
+
+    monkeypatch.setattr(mb.asyncio, "sleep", sleep)
+
+    async def store(mail):
+        stored.append(mail)
+        return {"stored": mail.get("message_id", "x")}
+
+    status = importlib.import_module("status").MailboxStatus()
+    with contextlib_suppress(Stop):
+        asyncio.run(mb.poll_forever(
+            store, lambda k: k in seen, seen.add,
+            "u", "p", tmp_path / ".imap-state.json", status,
+        ))
+    return status
+
+
+def contextlib_suppress(exc):
+    import contextlib
+    return contextlib.suppress(exc)
+
+
+READ_ALREADY = RAW_AMAZON  # the flag state is irrelevant now; that is the point
+
+
+def test_an_already_read_mail_is_still_imported(tmp_path, monkeypatch):
+    """Opening Amazon's mail on your phone used to hide it from the bridge
+    forever, because the search filtered on UNSEEN."""
+    fake = FakeIMAP({7: READ_ALREADY})
+    stored = []
+    _run_poll(fake, tmp_path, stored, monkeypatch)
+    assert len(stored) == 1
+
+
+def test_the_mailbox_is_opened_read_only_and_no_flag_is_touched(tmp_path, monkeypatch):
+    fake = FakeIMAP({7: RAW_AMAZON})
+    _run_poll(fake, tmp_path, [], monkeypatch)
+    assert fake.selected_readonly is True
+    assert fake.flag_calls == []
+
+
+def test_a_quiet_poll_does_not_reimport_the_newest_mail(tmp_path, monkeypatch):
+    """"UID n:*" still matches the highest UID when it is below n, so without a
+    local filter every idle poll would hand back the same document."""
+    fake = FakeIMAP({7: RAW_AMAZON})
+    first = []
+    _run_poll(fake, tmp_path, first, monkeypatch)
+    second = []
+    _run_poll(fake, tmp_path, second, monkeypatch)
+    assert len(first) == 1 and second == []
+
+
+def test_the_checkpoint_survives_a_restart(tmp_path, monkeypatch):
+    fake = FakeIMAP({7: RAW_AMAZON})
+    _run_poll(fake, tmp_path, [], monkeypatch)
+    import json as _json
+    state = _json.loads((tmp_path / ".imap-state.json").read_text())
+    assert state["last_settled_uid"] == 7 and state["uidvalidity"] == 100
+
+
+def test_a_failure_does_not_advance_past_the_mail(tmp_path, monkeypatch):
+    """The next poll has to see it again; everything after it is newer, so
+    waiting skips nothing."""
+    import asyncio
+    import mailbox as mb
+
+    fake = FakeIMAP({7: RAW_AMAZON, 8: RAW_AMAZON})
+    monkeypatch.setattr(mb.imaplib, "IMAP4_SSL", lambda *a, **k: fake)
+
+    async def store(mail):
+        return {"error": "download failed"}
+
+    status = importlib.import_module("status").MailboxStatus()
+    state_file = tmp_path / ".imap-state.json"
+
+    async def one_pass():
+        messages, uidvalidity, checkpoint = await asyncio.to_thread(
+            mb.fetch_candidates, "u", "p", mb.read_state(state_file)
+        )
+        assert messages, "expected candidates"
+        try:
+            for uid, raw in messages:
+                result = await store(mb.to_resend_shape(raw))
+                if "error" in result:
+                    raise RuntimeError("stop")
+                mb.write_state(state_file, "INBOX", uidvalidity, uid)
+        except RuntimeError:
+            pass
+
+    asyncio.run(one_pass())
+    assert not state_file.exists()
+    assert status.last_settled_uid is None
+
+
+def test_a_renumbered_folder_rescans_without_duplicating(tmp_path, monkeypatch):
+    fake = FakeIMAP({7: RAW_AMAZON})
+    seen = set()
+    _run_poll(fake, tmp_path, [], monkeypatch, seen=seen)
+    fake.uidvalidity = 999  # server renumbered the folder
+    fake.messages = {3: RAW_AMAZON}  # same mail, new uid
+    again = []
+    _run_poll(fake, tmp_path, again, monkeypatch, seen=seen)
+    assert again == [], "Message-ID dedupe should absorb the rescan"
+
+
+def test_a_cold_start_only_looks_at_the_recent_window(tmp_path, monkeypatch):
+    fake = FakeIMAP({7: RAW_AMAZON})
+    _run_poll(fake, tmp_path, [], monkeypatch)
+    assert fake.searches[0].startswith("SINCE "), fake.searches
+    assert 'FROM "amazon"' in fake.searches[0]
+
+
+# --- status endpoint and client guidance ------------------------------------
+
+
+def _client():
+    from fastapi.testclient import TestClient
+    return TestClient(app.app)
+
+
+def test_status_requires_the_bridge_token():
+    assert _client().get("/status").status_code == 401
+
+
+def test_status_never_returns_a_secret():
+    """It reports what is configured and what happened, never a credential."""
+    body = _client().get(
+        "/status", headers={"Authorization": f"Bearer {app.BRIDGE_TOKEN}"}
+    ).text
+    for secret in (app.BRIDGE_TOKEN, app.MCP_TOKEN, app.RESEND_API_KEY,
+                   app.SMTP_PASSWORD, app.WEBHOOK_SECRET):
+        if secret:
+            assert secret not in body, "a secret reached the status endpoint"
+
+
+def test_status_reports_the_configured_directions():
+    body = _client().get(
+        "/status", headers={"Authorization": f"Bearer {app.BRIDGE_TOKEN}"}
+    ).json()
+    assert body["mail_out"] == app.MAIL_OUT and body["mail_in"] == app.MAIL_IN
+
+
+def test_mailbox_status_starts_out_never_connected():
+    from status import MailboxStatus
+    fresh = MailboxStatus()
+    assert fresh.ever_connected is False
+    assert fresh.as_dict()["checkpoint"]["last_settled_uid"] is None
+
+
+def test_a_failed_poll_is_recorded_and_truncated():
+    from status import MailboxStatus
+    fresh = MailboxStatus()
+    fresh.poll_failed(ValueError("x" * 500))
+    assert fresh.consecutive_failures == 1
+    assert len(fresh.as_dict()["last_error"]) <= 200
+
+
+def test_the_server_tells_clients_how_the_loop_works():
+    """Codex reads the instructions field and uses the first 512 characters
+    when deciding how to use the server, so the loop has to be complete before
+    the caveats start."""
+    instructions = app.mcp.instructions or ""
+    assert instructions, "no MCP instructions set"
+    opening = instructions[:512]
+    for word in ("send_to_scribe", "list_annotated", "get_annotated",
+                 "ack_annotated"):
+        assert word in opening, f"{word} missing from the first 512 characters"

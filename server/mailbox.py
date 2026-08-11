@@ -12,19 +12,30 @@ Security logic lives in app.store_document and must not be duplicated here.
 """
 
 import asyncio
+import contextlib
 import email
 import imaplib
+import json
 import os
+import re
+import time
 from email.header import decode_header, make_header
 from email.message import Message
+from pathlib import Path
 
 IMAP_HOST = os.environ.get("IMAP_HOST", "")
 IMAP_PORT = int(os.environ.get("IMAP_PORT", "993"))
 IMAP_FOLDER = os.environ.get("IMAP_FOLDER", "INBOX")
 POLL_SECONDS = int(os.environ.get("IMAP_POLL_SECONDS", "60"))
 # A mailbox holds unrelated mail; only look at what could be a Kindle export.
-SEARCH = '(UNSEEN FROM "amazon")'
+SENDER_FILTER = 'FROM "amazon"'
 MAX_PER_POLL = 10
+# How far back a fresh install looks. IMAP SINCE has day resolution, so this is
+# "from yesterday's date", which is deliberately generous: better a couple of
+# extra candidates at setup than an empty window for someone who shared a
+# document just before running it. Without a bound, a first run against a
+# mailbox with years of Kindle exports would import all of them.
+COLD_START_DAYS = 1
 
 
 def _decode(value: str | None) -> str:
@@ -97,39 +108,88 @@ def to_resend_shape(raw: bytes) -> dict:
     }
 
 
-def _fetch_unseen(user: str, password: str) -> list[tuple[bytes, bytes]]:
-    """Return (uid, raw message) for candidate mails, newest handled first."""
+def read_state(path: Path) -> dict:
+    if path.exists():
+        with contextlib.suppress(ValueError, OSError):
+            state = json.loads(path.read_text())
+            if isinstance(state, dict):
+                return state
+    return {}
+
+
+def write_state(path: Path, folder: str, uidvalidity: int, last_uid: int) -> None:
+    with contextlib.suppress(OSError):
+        path.write_text(json.dumps({
+            "folder": folder,
+            "uidvalidity": uidvalidity,
+            "last_settled_uid": last_uid,
+        }))
+
+
+def _uidvalidity(imap: imaplib.IMAP4_SSL, folder: str) -> int:
+    """UIDVALIDITY changes when the server renumbers a folder; UIDs from before
+    the change mean nothing after it."""
+    status, data = imap.status(f'"{folder}"', "(UIDVALIDITY)")
+    if status != "OK" or not data:
+        return 0
+    found = re.search(rb"UIDVALIDITY\s+(\d+)", data[0] or b"")
+    return int(found.group(1)) if found else 0
+
+
+def _search_criteria(last_uid: int | None) -> str:
+    if last_uid:
+        return f"UID {last_uid + 1}:* {SENDER_FILTER}"
+    cutoff = time.strftime("%d-%b-%Y", time.gmtime(time.time() - COLD_START_DAYS * 86400))
+    return f'SINCE {cutoff} {SENDER_FILTER}'
+
+
+def fetch_candidates(user: str, password: str, state: dict) -> tuple[list, int, int]:
+    """Return (messages, uidvalidity, checkpoint) — messages oldest first.
+
+    The mailbox is opened read-only and bodies are read with BODY.PEEK[], so
+    nothing here can change a flag. Reading with RFC822 would set \\Seen as a
+    side effect even without asking, which is why it is not used.
+    """
     with imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=60) as imap:
         imap.login(user, password)
-        imap.select(IMAP_FOLDER)
-        status, data = imap.search(None, SEARCH)
+        uidvalidity = _uidvalidity(imap, IMAP_FOLDER)
+        last_uid = state.get("last_settled_uid")
+        if state.get("uidvalidity") not in (None, uidvalidity):
+            # The folder was renumbered. Fall back to the cold-start window and
+            # let the Message-ID replay guard absorb anything already stored;
+            # it keeps 24h of history, which is exactly this window.
+            print("mailbox: UIDVALIDITY changed, rescanning recent mail",
+                  flush=True)
+            last_uid = None
+        imap.select(IMAP_FOLDER, readonly=True)
+        status, data = imap.uid("SEARCH", None, _search_criteria(last_uid))
         if status != "OK" or not data or not data[0]:
-            return []
-        uids = data[0].split()[:MAX_PER_POLL]
+            return [], uidvalidity, last_uid or 0
+        # A "UID n:*" range always matches the highest UID in the folder, even
+        # when it is below n. Without this filter every quiet poll would hand
+        # back the newest mail again.
+        floor = last_uid or 0
+        uids = sorted(int(u) for u in data[0].split())
+        uids = [u for u in uids if u > floor][:MAX_PER_POLL]
         out = []
         for uid in uids:
-            status, payload = imap.fetch(uid, "(RFC822)")
+            status, payload = imap.uid("FETCH", str(uid), "(BODY.PEEK[])")
             if status == "OK" and payload and isinstance(payload[0], tuple):
                 out.append((uid, payload[0][1]))
-        return out
-
-
-def _mark_seen(user: str, password: str, uids: list[bytes]) -> None:
-    if not uids:
-        return
-    with imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=60) as imap:
-        imap.login(user, password)
-        imap.select(IMAP_FOLDER)
-        for uid in uids:
-            imap.store(uid, "+FLAGS", "\\Seen")
+        return out, uidvalidity, floor
 
 
 async def poll_forever(store_document, already_processed, mark_processed,
-                       user: str, password: str) -> None:
+                       user: str, password: str, state_path: Path,
+                       status) -> None:
     """Check the mailbox on a timer until the app shuts down.
 
     Dependencies are passed in rather than imported so this module never
     reaches back into app.py — the trust boundary stays in one place.
+
+    Progress is a UID checkpoint rather than the \\Seen flag: a mail the user
+    already opened on their phone must still be imported, and the bridge must
+    not change what is read in someone's mailbox to keep track of its own work.
     """
     print(
         f"mailbox transport: polling {IMAP_HOST} every {POLL_SECONDS}s",
@@ -137,25 +197,29 @@ async def poll_forever(store_document, already_processed, mark_processed,
     )
     while True:
         try:
-            messages = await asyncio.to_thread(_fetch_unseen, user, password)
-            handled = []
+            state = read_state(state_path)
+            messages, uidvalidity, checkpoint = await asyncio.to_thread(
+                fetch_candidates, user, password, state
+            )
             for uid, raw in messages:
                 mail = to_resend_shape(raw)
-                key = mail.get("message_id") or f"uid-{uid.decode()}"
-                if already_processed(key):
-                    handled.append(uid)
-                    continue
-                result = await store_document(mail)
-                # Leave a failed fetch unseen so the next poll retries it; an
-                # ignored mail is settled and should not be looked at again.
-                if "stored" in result:
-                    mark_processed(key)
-                    handled.append(uid)
-                elif "ignored" in result:
-                    handled.append(uid)
-            await asyncio.to_thread(_mark_seen, user, password, handled)
+                key = mail.get("message_id") or f"uid-{uidvalidity}-{uid}"
+                if not already_processed(key):
+                    result = await store_document(mail)
+                    if "error" in result:
+                        # Stop the batch without advancing: the next poll has
+                        # to see this mail again, and everything after it is
+                        # newer, so nothing is skipped by waiting.
+                        raise RuntimeError(f"storing uid {uid}: {result['error']}")
+                    if "stored" in result:
+                        mark_processed(key)
+                        status.document_imported()
+                checkpoint = uid
+                write_state(state_path, IMAP_FOLDER, uidvalidity, checkpoint)
+            status.poll_succeeded(IMAP_FOLDER, uidvalidity, checkpoint)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # keep polling through transient failures
+            status.poll_failed(exc)
             print(f"mailbox poll failed: {type(exc).__name__}: {exc}", flush=True)
         await asyncio.sleep(POLL_SECONDS)

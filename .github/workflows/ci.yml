@@ -59,6 +59,12 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
             http://127.0.0.1:8378/webhook/inbound -d '{}')
           test "$code" = "404"
+          # The status endpoint is the diagnosis path; it must not be readable
+          # without the token, and must say the mailbox never connected.
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8378/status)
+          test "$code" = "401"
+          curl -sf -H 'Authorization: Bearer citoken' \
+            http://127.0.0.1:8378/status | grep -q '"ever_connected":false'
           docker rm -f mailbox-bridge
 
       - name: Start container in hybrid mode (SMTP out, Resend webhook in)

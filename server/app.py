@@ -38,6 +38,7 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
+from mailmode import submission_mode
 from status import MailboxStatus
 
 RESEND_API = "https://api.resend.com"
@@ -474,7 +475,7 @@ def smtp_connection() -> smtplib.SMTP:
     would fail on both the machines people deploy to and a major provider.
     `SMTP_SECURITY` overrides the port-based guess.
     """
-    if SMTP_SECURITY == "ssl" or (not SMTP_SECURITY and SMTP_PORT == 465):
+    if submission_mode(SMTP_PORT, SMTP_SECURITY) == "ssl":
         return smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=120)
     smtp = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=120)
     try:

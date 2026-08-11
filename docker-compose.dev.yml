@@ -1,0 +1,17 @@
+# Build from this checkout instead of pulling the published image. Use when
+# you are changing the code, or on a platform the release does not cover:
+#
+#   docker compose -f docker-compose.dev.yml up -d --build
+#
+# Everything else -- hardening, volumes, port binding -- is inherited from
+# docker-compose.yml, so the two cannot drift apart.
+services:
+  scribe-bridge:
+    extends:
+      file: docker-compose.yml
+      service: scribe-bridge
+    build: .
+    image: kindle-scribe-mcp:dev
+
+volumes:
+  scribe-data:

@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""Check the bridge, and prove the round trip works, before trusting it.
+
+Sending fails silently in this system by design: Amazon drops mail from an
+unapproved sender without a bounce, and a wrong app password looks exactly like
+a quiet afternoon. These commands turn that into an answer.
+
+    ./scribe doctor            what is configured, and does it actually work
+    ./scribe doctor --json     same, machine-readable, exit 1 on failure
+    ./scribe test              send a document with a test id in it
+    ./scribe verify            confirm that exact document came back
+
+doctor opens one connection per check per run. Do not put it in a loop: a
+provider that sees a login attempt every few seconds locks the account.
+"""
+
+import argparse
+import imaplib
+import json
+import pathlib
+import smtplib
+import socket
+import ssl
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+HERE = pathlib.Path(__file__).resolve().parent
+ENV = HERE / ".env"
+TEST_STATE = HERE / ".scribe-test.json"
+sys.path.insert(0, str(HERE / "server"))
+from mailmode import submission_mode  # noqa: E402  (needs the path above)
+
+OK, WARN, FAIL = "ok", "warn", "fail"
+MARK = {OK: "\033[32m✓\033[0m", WARN: "\033[33m!\033[0m", FAIL: "\033[31m✗\033[0m"}
+
+
+class Report:
+    def __init__(self) -> None:
+        self.checks: list[dict] = []
+
+    def add(self, name: str, state: str, detail: str = "") -> None:
+        # Server error bodies arrive with newlines in them and would break the
+        # column alignment, which is the only thing making this readable.
+        self.checks.append(
+            {"check": name, "state": state, "detail": " ".join(detail.split())}
+        )
+
+    @property
+    def failed(self) -> bool:
+        return any(c["state"] == FAIL for c in self.checks)
+
+    def render(self) -> None:
+        width = max(len(c["check"]) for c in self.checks)
+        for c in self.checks:
+            print(f"  {MARK[c['state']]} {c['check']:<{width}}  {c['detail']}")
+
+
+def read_env() -> dict:
+    if not ENV.exists():
+        sys.exit(f"No .env at {ENV} — run ./setup.sh first.")
+    values = {}
+    for line in ENV.read_text().splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip()
+    return values
+
+
+def directions(env: dict) -> tuple[str, str]:
+    """MAIL_OUT/MAIL_IN, honouring the older single switch."""
+    legacy = {"mailbox": ("smtp", "imap"), "resend": ("resend", "resend")}
+    out_default, in_default = legacy.get(
+        env.get("MAIL_TRANSPORT", "").lower(), ("resend", "resend")
+    )
+    return (env.get("MAIL_OUT") or out_default, env.get("MAIL_IN") or in_default)
+
+
+def bridge_url(env: dict) -> str:
+    return (env.get("BRIDGE_URL") or "http://127.0.0.1:8377").rstrip("/")
+
+
+def http(url: str, token: str = "", timeout: int = 15, data: bytes | None = None,
+         content_type: str = "") -> tuple[int, str]:
+    request = urllib.request.Request(url, data=data)
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    if content_type:
+        request.add_header("Content-Type", content_type)
+        request.add_header("Accept", "application/json, text/event-stream")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read().decode()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode()[:300]
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return 0, str(exc)
+
+
+# --- individual checks ------------------------------------------------------
+
+
+def check_settings(env: dict, out: str, mail_in: str, report: Report) -> None:
+    required = ["KINDLE_EMAIL", "BRIDGE_TOKEN", "RETURN_EMAIL"]
+    required += (["SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"] if out == "smtp"
+                 else ["RESEND_API_KEY", "FROM_EMAIL"])
+    if mail_in == "imap":
+        required += ["IMAP_HOST"]
+    else:
+        required += ["RESEND_API_KEY", "RESEND_WEBHOOK_SECRET"]
+    missing = [name for name in dict.fromkeys(required) if not env.get(name)]
+    if missing:
+        report.add("settings", FAIL, f"missing: {', '.join(missing)}")
+    else:
+        report.add("settings", OK, f"MAIL_OUT={out} MAIL_IN={mail_in}")
+
+
+def check_smtp(env: dict, report: Report) -> None:
+    host = env.get("SMTP_HOST", "")
+    port = int(env.get("SMTP_PORT") or 465)
+    mode = submission_mode(port, env.get("SMTP_SECURITY", ""))
+    if not host:
+        report.add("smtp", FAIL, "SMTP_HOST is empty")
+        return
+    try:
+        socket.getaddrinfo(host, port)
+    except socket.gaierror as exc:
+        report.add("smtp dns", FAIL, f"{host}: {exc}")
+        return
+    try:
+        if mode == "ssl":
+            smtp = smtplib.SMTP_SSL(host, port, timeout=20)
+        else:
+            smtp = smtplib.SMTP(host, port, timeout=20)
+            smtp.starttls(context=ssl.create_default_context())
+        with smtp:
+            smtp.login(env.get("SMTP_USER", ""), env.get("SMTP_PASSWORD", ""))
+        report.add("smtp", OK, f"{host}:{port} ({mode}) accepted the app password")
+    except smtplib.SMTPAuthenticationError:
+        report.add("smtp", FAIL,
+                   f"{host}:{port} rejected the password — use an app password, "
+                   "not your account password (2FA must be on)")
+    except (OSError, smtplib.SMTPException) as exc:
+        hint = ""
+        if port == 465:
+            # The failure that cost a whole debugging session: hosts block 465.
+            hint = " — many hosts block 465; try SMTP_PORT=587"
+        report.add("smtp", FAIL, f"{host}:{port} ({mode}): {exc}{hint}")
+
+
+def check_imap(env: dict, report: Report) -> None:
+    host = env.get("IMAP_HOST", "")
+    port = int(env.get("IMAP_PORT") or 993)
+    folder = env.get("IMAP_FOLDER") or "INBOX"
+    user = env.get("IMAP_USER") or env.get("SMTP_USER", "")
+    password = env.get("IMAP_PASSWORD") or env.get("SMTP_PASSWORD", "")
+    if not host:
+        report.add("imap", FAIL, "IMAP_HOST is empty")
+        return
+    try:
+        imap = imaplib.IMAP4_SSL(host, port, timeout=20)
+        imap.login(user, password)
+        status, _ = imap.select(folder, readonly=True)  # never write
+        imap.logout()
+        if status != "OK":
+            report.add("imap", FAIL, f"cannot open folder {folder}")
+        else:
+            report.add("imap", OK, f"{host} {folder} readable as {user}")
+    except imaplib.IMAP4.error as exc:
+        report.add("imap", FAIL, f"{host} rejected the login: {exc}")
+    except OSError as exc:
+        report.add("imap", FAIL, f"{host}:{port}: {exc}")
+
+
+def check_resend(env: dict, mail_in: str, report: Report) -> None:
+    key = env.get("RESEND_API_KEY", "")
+    code, body = http("https://api.resend.com/domains", key)
+    if code != 200:
+        report.add("resend api", FAIL, f"HTTP {code}: {body[:120]}")
+        return
+    report.add("resend api", OK, "key accepted")
+    if mail_in != "resend":
+        return
+    domain = env.get("RETURN_EMAIL", "").partition("@")[2].lower()
+    if domain.endswith(".resend.app"):
+        report.add("resend receiving", OK, f"managed domain {domain}")
+        return
+    match = next((d for d in json.loads(body).get("data", [])
+                  if domain.endswith(d.get("name", "\0").lower())), None)
+    if not match:
+        report.add("resend receiving", FAIL,
+                   f"no Resend domain matches {domain or '(unset)'}")
+    elif (match.get("capabilities") or {}).get("receiving") != "enabled":
+        report.add("resend receiving", FAIL,
+                   "'Enable Receiving' is off for this domain, so nothing can "
+                   "ever arrive — the toggle in the add-domain form does not "
+                   "always stick")
+    else:
+        report.add("resend receiving", OK, f"{match['name']} sending+receiving")
+
+
+def check_bridge(env: dict, mail_in: str, report: Report) -> None:
+    base = bridge_url(env)
+    code, body = http(f"{base}/healthz")
+    if code != 200:
+        report.add("bridge", WARN,
+                   f"{base} not answering ({body[:60] or code}) — start it with "
+                   "docker compose up -d")
+        return
+    report.add("bridge", OK, f"{base} healthy, mcp={json.loads(body)['mcp']}")
+    code, body = http(f"{base}/status", env.get("BRIDGE_TOKEN", ""))
+    if code != 200:
+        report.add("bridge status", FAIL, f"HTTP {code}: {body[:120]}")
+        return
+    status = json.loads(body)
+    if mail_in == "imap":
+        mailbox = status.get("mailbox", {})
+        if not mailbox.get("ever_connected"):
+            report.add("mailbox poll", FAIL,
+                       f"never reached the mailbox: {mailbox.get('last_error') or 'no attempt yet'}")
+        else:
+            since = mailbox.get("seconds_since_last_poll")
+            state = OK if (since is not None and since < 300) else WARN
+            report.add("mailbox poll", state,
+                       f"last success {since}s ago, checkpoint "
+                       f"uid {mailbox['checkpoint']['last_settled_uid']}")
+    elif not status.get("webhook_secret_set"):
+        report.add("webhook secret", FAIL,
+                   "not set — the webhook answers 503 and nothing arrives; run "
+                   "./scribe-finish https://<your-public-host>")
+    else:
+        report.add("webhook secret", OK, "set")
+    report.add("documents waiting", OK, str(status.get("documents_waiting", 0)))
+
+
+def check_renderers(report: Report) -> None:
+    """weasyprint and poppler live in the container, not on this machine."""
+    probe = subprocess.run(
+        ["docker", "compose", "ps", "-q", "scribe-bridge"],
+        capture_output=True, text=True, cwd=HERE,
+    )
+    if probe.returncode != 0 or not probe.stdout.strip():
+        report.add("renderers", WARN, "container not running, skipped")
+        return
+    for tool, args in (("weasyprint", ["--version"]), ("pdftoppm", ["-v"])):
+        run = subprocess.run(
+            ["docker", "compose", "exec", "-T", "scribe-bridge", tool, *args],
+            capture_output=True, text=True, cwd=HERE,
+        )
+        state = OK if run.returncode == 0 else FAIL
+        first = (run.stdout or run.stderr).strip().splitlines()
+        report.add(f"renderer {tool}", state, first[0][:60] if first else "")
+
+
+# --- commands ---------------------------------------------------------------
+
+
+def cmd_doctor(args) -> int:
+    env = read_env()
+    out, mail_in = directions(env)
+    report = Report()
+    check_settings(env, out, mail_in, report)
+    if out == "smtp":
+        check_smtp(env, report)
+    if mail_in == "imap":
+        check_imap(env, report)
+    if "resend" in (out, mail_in):
+        check_resend(env, mail_in, report)
+    check_bridge(env, mail_in, report)
+    check_renderers(report)
+
+    if args.json:
+        print(json.dumps({"checks": report.checks, "ok": not report.failed},
+                         indent=2))
+    else:
+        print()
+        report.render()
+        print()
+        if report.failed:
+            print("Something above will stop documents moving. "
+                  "docs/troubleshooting.md covers each of these.")
+        else:
+            print("Everything the bridge needs is working. "
+                  "./scribe test sends a document to prove the round trip.")
+    return 1 if report.failed else 0
+
+
+def cmd_test(args) -> int:
+    env = read_env()
+    token = env.get("MCP_TOKEN", "")
+    if not token:
+        sys.exit("MCP_TOKEN is empty, so there is no endpoint to send through.")
+    test_id = f"{int(time.time()):x}"
+    markdown = (
+        f"# 1. Test {test_id}\n\n"
+        "If you are reading this on the Scribe, the outgoing half works: "
+        "rendering, mail and Amazon's approved-sender list.\n\n"
+        "# 2. Now close the loop\n\n"
+        "Write something here with the stylus — a single word is enough — then "
+        "tap Share, send it by email to\n\n"
+        f"**{env.get('RETURN_EMAIL', '(RETURN_EMAIL unset)')}**\n\n"
+        "and run `./scribe verify` on the machine running the bridge.\n\n"
+        "# 3. What is being measured\n\n"
+        f"The id {test_id} is in the title, so verify can tell this document "
+        "from anything else that happens to arrive.\n"
+    )
+    payload = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "send_to_scribe", "arguments": {
+            "title": f"Scribe test {test_id}", "content_markdown": markdown}},
+    }).encode()
+    code, body = http(f"{bridge_url(env)}/{token}/mcp", timeout=180,
+                      data=payload, content_type="application/json")
+    if code != 200:
+        print(f"✗ the bridge refused the send (HTTP {code}): {body[:200]}")
+        return 1
+    result = json.loads(body).get("result", {})
+    if result.get("isError"):
+        print(f"✗ {result['content'][0]['text']}")
+        return 1
+    TEST_STATE.write_text(json.dumps({"id": test_id, "sent_at": int(time.time())}))
+    print(f"✓ {result['content'][0]['text']}")
+    print(f"\nTest id {test_id}. Write on it, share it back to "
+          f"{env.get('RETURN_EMAIL', '')}, then run ./scribe verify")
+    return 0
+
+
+def cmd_verify(args) -> int:
+    env = read_env()
+    if not TEST_STATE.exists():
+        sys.exit("No test in flight — run ./scribe test first.")
+    state = json.loads(TEST_STATE.read_text())
+    test_id = state["id"]
+    code, body = http(f"{bridge_url(env)}/inbox", env.get("BRIDGE_TOKEN", ""))
+    if code != 200:
+        print(f"✗ cannot read the inbox (HTTP {code}): {body[:120]}")
+        return 1
+    items = json.loads(body)["items"]
+    hit = next((i for i in items
+                if test_id in (i.get("title", "") + i.get("subject", ""))), None)
+    if hit:
+        waited = int(time.time()) - state["sent_at"]
+        print(f"✓ test {test_id} came back after {waited // 60}m {waited % 60}s "
+              f"as {hit['id']} ({hit['size'] // 1024} kB)")
+        print("  The whole loop works. Ask Claude to read it: "
+              "\"read my feedback from the Kindle\"")
+        TEST_STATE.unlink(missing_ok=True)
+        return 0
+    print(f"✗ test {test_id} has not arrived yet ({len(items)} other documents "
+          "stored)")
+    print("  Amazon's export mail takes 1–5 minutes. If it never comes: did the "
+          "share go to " + env.get("RETURN_EMAIL", "?") + "? ./scribe doctor "
+          "checks the receiving side.")
+    return 1
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="scribe", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    doctor = sub.add_parser("doctor", help="check the configuration end to end")
+    doctor.add_argument("--json", action="store_true", help="machine-readable")
+    doctor.set_defaults(func=cmd_doctor)
+    sub.add_parser("test", help="send a test document").set_defaults(func=cmd_test)
+    sub.add_parser("verify", help="confirm the test came back").set_defaults(
+        func=cmd_verify)
+    args = parser.parse_args()
+    sys.exit(args.func(args))
+
+
+if __name__ == "__main__":
+    main()

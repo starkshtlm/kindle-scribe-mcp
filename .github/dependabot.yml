@@ -1,0 +1,21 @@
+# Publishing an image moves responsibility for its CVEs here: weasyprint and
+# poppler parse files strangers mailed you. These raise the PR; the lock file
+# still has to be regenerated (see server/requirements.lock) before merging a
+# Python bump.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /server
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

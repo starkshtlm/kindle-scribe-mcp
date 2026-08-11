@@ -925,3 +925,63 @@ def test_the_server_tells_clients_how_the_loop_works():
     for word in ("send_to_scribe", "list_annotated", "get_annotated",
                  "ack_annotated"):
         assert word in opening, f"{word} missing from the first 512 characters"
+
+
+# --- packaging --------------------------------------------------------------
+# Installing should mean pulling a published image, not compiling weasyprint on
+# a laptop. These keep the pieces of that from drifting apart.
+
+
+def _repo_root():
+    from pathlib import Path
+    return Path(app.__file__).resolve().parent.parent
+
+
+def test_every_requirement_is_pinned_in_the_lock():
+    """The lock is what the image installs; a package only in the ranges file
+    would be resolved at build time and differ between builds."""
+    import re as _re
+    root = _repo_root()
+    named = _re.findall(r"^([A-Za-z0-9_.\-]+)",
+                        (root / "server" / "requirements.txt").read_text(), _re.M)
+    lock = (root / "server" / "requirements.lock").read_text().lower()
+    missing = [n for n in named if f"\n{n.lower()}==" not in "\n" + lock]
+    assert not missing, f"not pinned in requirements.lock: {missing}"
+
+
+def test_the_image_installs_the_lock_not_the_ranges():
+    assert "requirements.lock" in (_repo_root() / "Dockerfile").read_text()
+
+
+def test_compose_defaults_to_the_version_being_released():
+    """A compose file pointing at a tag that was never published gives every
+    new user 'manifest unknown' as their first experience."""
+    import json as _json
+    import re as _re
+    root = _repo_root()
+    compose = (root / "docker-compose.yml").read_text()
+    default = _re.search(r"kindle-scribe-mcp:\$\{SCRIBE_VERSION:-(v[0-9.]+)\}",
+                         compose)
+    assert default, "compose does not pin a default image version"
+    plugin = _json.loads(
+        (root / "plugin" / ".claude-plugin" / "plugin.json").read_text())["version"]
+    assert default.group(1) == f"v{plugin}", (
+        f"compose default {default.group(1)} != manifest v{plugin}")
+
+
+def test_production_compose_keeps_the_container_hardened():
+    compose = (_repo_root() / "docker-compose.yml").read_text()
+    for setting in ("read_only: true", "cap_drop", "no-new-privileges"):
+        assert setting in compose, f"{setting} disappeared from docker-compose.yml"
+
+
+@pytest.mark.parametrize(
+    "port,override,expected",
+    [(465, "", "ssl"), (587, "", "starttls"), (2525, "", "starttls"),
+     (587, "ssl", "ssl"), (465, "starttls", "starttls"), (465, "SSL", "ssl")],
+)
+def test_submission_mode_is_shared_by_server_and_cli(port, override, expected):
+    """./scribe doctor must test the same connection the bridge makes, so the
+    rule lives in one module both import."""
+    from mailmode import submission_mode
+    assert submission_mode(port, override) == expected

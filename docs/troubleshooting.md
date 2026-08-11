@@ -3,6 +3,13 @@
 Every item below is a real failure that cost hours to diagnose. Check here
 before assuming your setup is broken.
 
+**Start with `./scribe doctor`.** It tests the app password, the submission
+port, the mailbox, the Resend domain and the renderers, and names whichever one
+is broken — most of this page is the explanation for a line it prints.
+`./scribe doctor --json` exits non-zero when something failed, for scripts.
+Run it when something is wrong, not on a timer: each run is a login attempt,
+and a provider that sees those every few seconds locks the account.
+
 ## Sending
 
 **The document never appears on the Scribe.**

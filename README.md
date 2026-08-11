@@ -34,8 +34,14 @@ That is it. No domain, no DNS, no webhook. **About five minutes.**
 git clone https://github.com/starkshtlm/kindle-scribe-mcp
 cd kindle-scribe-mcp
 ./setup.sh          # pick "mailbox", paste an app password
-docker compose up -d
+docker compose up -d   # pulls a published image; nothing is compiled
+./scribe doctor        # says what works before you trust it
 ```
+
+`doctor` checks the things that otherwise fail silently — a rejected app
+password, a blocked submission port, a mailbox that never connected — and says
+which one it is. `./scribe test` then sends a document with a test id, and
+`./scribe verify` confirms that exact document came back.
 
 Then two things `setup.sh` cannot do for you:
 
@@ -150,6 +156,13 @@ margin as writing room, and generous line spacing. Ask Claude to number the
 headings — handwritten references like "see 2.3" then land unambiguously.
 
 ## Configuration
+
+The image is published multi-arch (amd64 and arm64) to
+`ghcr.io/starkshtlm/kindle-scribe-mcp`, with an SBOM and build provenance, and
+built from a lock file so two builds of a tag install the same versions. Pin a
+version with `SCRIBE_VERSION=v1.2.0` in `.env`; roll back by changing it and
+restarting. To build from a checkout instead:
+`docker compose -f docker-compose.dev.yml up -d --build`.
 
 `GET /status` (with `Authorization: Bearer $BRIDGE_TOKEN`) reports whether mail
 is actually flowing — whether the mailbox has ever connected, the last error,

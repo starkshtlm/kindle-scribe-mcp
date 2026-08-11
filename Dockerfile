@@ -9,8 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY server/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# The lock, not the ranges: two builds of the same tag must install the same
+# versions, months apart. requirements.txt stays the human-edited source.
+COPY server/requirements.lock .
+RUN pip install --no-cache-dir -r requirements.lock
 
 COPY server/ .
 

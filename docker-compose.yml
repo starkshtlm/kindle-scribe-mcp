@@ -1,7 +1,9 @@
 services:
   scribe-bridge:
-    build: .
-    image: kindle-scribe-mcp:latest
+    # Published multi-arch by the release workflow, so an install pulls instead
+    # of compiling. Pin a different version with SCRIBE_VERSION in .env, or use
+    # docker-compose.dev.yml to build from this checkout.
+    image: ghcr.io/starkshtlm/kindle-scribe-mcp:${SCRIBE_VERSION:-v1.2.0}
     restart: unless-stopped
     env_file: .env
     volumes:

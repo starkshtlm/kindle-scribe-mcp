@@ -10,7 +10,7 @@ jobs:
   build-and-smoke-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # The plugin version silently sat at 1.0.0 through four releases.
       # Keep the two manifests equal, and equal to the tag when one is pushed.

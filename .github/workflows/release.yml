@@ -20,7 +20,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # The tag is what users will pull; if the manifests disagree with it the
       # plugin and the image would ship different versions of the same release.

@@ -9,6 +9,7 @@ a quiet afternoon. These commands turn that into an answer.
     ./scribe doctor --json     same, machine-readable, exit 1 on failure
     ./scribe test              send a document with a test id in it
     ./scribe verify            confirm that exact document came back
+    ./scribe connect codex     register the bridge with an MCP client
 
 doctor opens one connection per check per run. Do not put it in a loop: a
 provider that sees a login attempt every few seconds locks the account.
@@ -356,6 +357,157 @@ def cmd_verify(args) -> int:
     return 1
 
 
+# --- connect ----------------------------------------------------------------
+# Codex CLI, the Codex IDE extension and the ChatGPT desktop app read the same
+# ~/.codex/config.toml, so registering once covers all three. Editing someone's
+# client configuration deserves care: show the change, keep a backup, and never
+# rewrite sections that belong to other servers.
+
+SERVER_NAME = "kindle-scribe"
+
+
+def codex_config_path() -> pathlib.Path:
+    import os
+    home = os.environ.get("CODEX_HOME") or (pathlib.Path.home() / ".codex")
+    return pathlib.Path(home) / "config.toml"
+
+
+def codex_block(url: str) -> str:
+    return (
+        f"[mcp_servers.{SERVER_NAME}]\n"
+        f'url = "{url}"\n'
+        "# The token in the path is the credential; treat this URL as a password.\n"
+    )
+
+
+def upsert_codex(text: str, url: str) -> tuple[str, str]:
+    """Return (new text, what happened). Only our own section is touched."""
+    block = codex_block(url)
+    header = f"[mcp_servers.{SERVER_NAME}]"
+    if header not in text:
+        joiner = "" if text.endswith("\n\n") or not text.strip() else "\n"
+        return text + joiner + block, "added"
+    lines = text.splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if line.strip() == header)
+    end = start + 1
+    while end < len(lines) and not lines[end].lstrip().startswith("["):
+        end += 1
+    if "".join(lines[start:end]).strip() == block.strip():
+        return text, "unchanged"
+    return "".join(lines[:start]) + block + "".join(lines[end:]), "updated"
+
+
+def mcp_url(env: dict, override: str) -> str:
+    if override:
+        base = override.rstrip("/")
+    else:
+        base = bridge_url(env)
+    token = env.get("MCP_TOKEN", "")
+    if not token:
+        sys.exit("MCP_TOKEN is empty, so there is no endpoint to connect to.")
+    return f"{base}/{token}/mcp"
+
+
+def verify_endpoint(url: str) -> tuple[bool, str]:
+    payload = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
+    code, body = http(url, data=payload, content_type="application/json",
+                      timeout=30)
+    if code != 200:
+        return False, f"HTTP {code}: {body[:120]}"
+    try:
+        names = sorted(t["name"] for t in json.loads(body)["result"]["tools"])
+    except (ValueError, KeyError, TypeError):
+        return False, f"unexpected reply: {body[:120]}"
+    return True, ", ".join(names)
+
+
+def redact(url: str) -> str:
+    """Never print the token; the whole URL is the credential."""
+    parts = url.rstrip("/").split("/")
+    if len(parts) >= 2:
+        parts[-2] = "<MCP_TOKEN>"
+    return "/".join(parts)
+
+
+def cmd_connect(args) -> int:
+    env = read_env()
+    url = mcp_url(env, args.url)
+    ok, detail = verify_endpoint(url)
+    if not ok:
+        print(f"✗ {redact(url)} did not answer as an MCP server: {detail}")
+        print("  Start the bridge first (docker compose up -d), or pass the "
+              "public URL with --url https://your-host")
+        return 1
+    print(f"✓ endpoint answers with: {detail}\n")
+
+    if args.client == "claude-code":
+        command = ["claude", "mcp", "add", "--transport", "http", "--scope",
+                   "user", SERVER_NAME, url]
+        printable = " ".join(command[:-1] + [redact(url)])
+        if not shutil_which("claude"):
+            print("The claude CLI is not on PATH. Run this where it is:\n")
+            print(f"    {printable}")
+            return 0
+        if not confirm(args.yes, f"Run: {printable}"):
+            return 1
+        run = subprocess.run(command, capture_output=True, text=True)
+        print((run.stdout or run.stderr).strip()[:400])
+        return run.returncode
+
+    path = codex_config_path()
+    existing = path.read_text() if path.exists() else ""
+    updated, action = upsert_codex(existing, url)
+
+    if args.client == "chatgpt-desktop":
+        # It reads the same file Codex does; a second configuration would be a
+        # second thing to keep in step, not a second integration.
+        if action == "unchanged":
+            print(f"✓ already registered in {path} — ChatGPT desktop reads the "
+                  "same file as Codex.")
+            print("  Restart the desktop app to pick up changes.")
+            return 0
+        print(f"! {SERVER_NAME} is not registered in {path} yet.")
+        print("  ChatGPT desktop shares Codex's configuration, so run:\n")
+        print("    ./scribe connect codex\n")
+        print("  then restart the desktop app.")
+        return 1
+
+    if action == "unchanged":
+        print(f"✓ {path} already points at this endpoint. Nothing to change.")
+        return 0
+
+    print(f"{action} in {path}:\n")
+    for line in codex_block(redact(url)).splitlines():
+        print(f"  + {line}")
+    print()
+    if not confirm(args.yes, "Write this?"):
+        return 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if existing:
+        backup = path.with_suffix(f".toml.bak-{int(time.time())}")
+        backup.write_text(existing)
+        print(f"  backup: {backup}")
+    path.write_text(updated)
+    print(f"✓ {action}. Restart Codex (and the ChatGPT desktop app, which reads "
+          "the same file) to pick it up.")
+    return 0
+
+
+def shutil_which(name: str):
+    import shutil
+    return shutil.which(name)
+
+
+def confirm(assume_yes: bool, question: str) -> bool:
+    if assume_yes:
+        return True
+    if not sys.stdin.isatty():
+        print(f"{question}  (not a terminal; re-run with --yes)")
+        return False
+    return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="scribe", description=__doc__,
@@ -367,6 +519,14 @@ def main() -> None:
     sub.add_parser("test", help="send a test document").set_defaults(func=cmd_test)
     sub.add_parser("verify", help="confirm the test came back").set_defaults(
         func=cmd_verify)
+    connect = sub.add_parser("connect", help="register with an MCP client")
+    connect.add_argument("client",
+                         choices=["claude-code", "codex", "chatgpt-desktop"])
+    connect.add_argument("--url", default="",
+                         help="public base URL, when the client is not on this "
+                              "machine (default: the local bridge)")
+    connect.add_argument("--yes", action="store_true", help="skip the prompt")
+    connect.set_defaults(func=cmd_connect)
     args = parser.parse_args()
     sys.exit(args.func(args))
 

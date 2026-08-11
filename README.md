@@ -56,8 +56,19 @@ Then two things `setup.sh` cannot do for you:
 Ask Claude to send something to your Kindle. Write on it. Share it back by
 email to yourself — the bridge watches that mailbox and picks it up.
 
-Works with **any MCP client**, not just Claude: Claude Code, Cursor, VS Code
-agents and anything else that speaks the protocol.
+Works with **any MCP client**, not just Claude:
+
+```bash
+./scribe connect claude-code
+./scribe connect codex            # also covers the Codex IDE extension
+./scribe connect chatgpt-desktop  # shares Codex's configuration
+```
+
+`connect` verifies the endpoint answers, shows the change, keeps a backup and
+leaves other servers in the file alone. See
+[`docs/clients/`](docs/clients/) for Codex and ChatGPT desktop specifics.
+Cursor, VS Code agents and anything else that speaks the protocol work too —
+point them at the same URL.
 
 ### Using it from claude.ai chats
 
@@ -160,7 +171,7 @@ headings — handwritten references like "see 2.3" then land unambiguously.
 The image is published multi-arch (amd64 and arm64) to
 `ghcr.io/starkshtlm/kindle-scribe-mcp`, with an SBOM and build provenance, and
 built from a lock file so two builds of a tag install the same versions. Pin a
-version with `SCRIBE_VERSION=v1.2.0` in `.env`; roll back by changing it and
+version with `SCRIBE_VERSION=v1.2.1` in `.env`; roll back by changing it and
 restarting. To build from a checkout instead:
 `docker compose -f docker-compose.dev.yml up -d --build`.
 

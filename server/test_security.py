@@ -995,3 +995,61 @@ def test_the_mcp_pin_cannot_be_widened_by_a_bot():
     dependabot = (root / ".github" / "dependabot.yml").read_text()
     assert "dependency-name: mcp" in dependabot
     assert "version-update:semver-major" in dependabot
+
+
+# --- scribe connect ---------------------------------------------------------
+# Editing someone's client configuration is the one thing here that touches a
+# file we do not own. It must add our server without disturbing theirs.
+
+
+def _cli():
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    path = str(_repo_root() / "scribe")
+    spec = importlib.util.spec_from_loader("scribecli",
+                                           SourceFileLoader("scribecli", path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+OTHER_SERVERS = """[mcp_servers.something-else]
+command = "other"
+args = ["x"]
+
+[history]
+persistence = "save-all"
+"""
+
+
+def test_connect_leaves_other_servers_alone():
+    cli = _cli()
+    updated, action = cli.upsert_codex(OTHER_SERVERS, "https://h/tok/mcp")
+    assert action == "added"
+    assert "[mcp_servers.something-else]" in updated
+    assert 'persistence = "save-all"' in updated
+    assert 'url = "https://h/tok/mcp"' in updated
+
+
+def test_connect_is_idempotent():
+    cli = _cli()
+    once, _ = cli.upsert_codex(OTHER_SERVERS, "https://h/tok/mcp")
+    twice, action = cli.upsert_codex(once, "https://h/tok/mcp")
+    assert action == "unchanged" and twice == once
+
+
+def test_connect_replaces_only_its_own_section_when_the_url_changes():
+    cli = _cli()
+    once, _ = cli.upsert_codex(OTHER_SERVERS, "https://h/old/mcp")
+    changed, action = cli.upsert_codex(once, "https://h/new/mcp")
+    assert action == "updated"
+    assert "https://h/old/mcp" not in changed
+    assert "[mcp_servers.something-else]" in changed
+    assert changed.count("[mcp_servers.kindle-scribe]") == 1
+
+
+def test_the_token_is_never_printed():
+    """The whole URL is the credential, and connect echoes what it will write."""
+    cli = _cli()
+    assert cli.redact("https://host/supersecret/mcp") == "https://host/<MCP_TOKEN>/mcp"
+    assert "supersecret" not in cli.redact("https://host/supersecret/mcp")

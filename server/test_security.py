@@ -1085,3 +1085,17 @@ def test_the_lock_satisfies_the_ranges_it_was_generated_from():
                 f"{name}: lock has {locked[name]} but requirements.txt asks for "
                 f">={floor.group(1)} — regenerate server/requirements.lock"
             )
+
+
+def test_the_lock_names_the_python_it_was_resolved_against():
+    """A base-image bump without regenerating the lock is the trap this repo
+    walked into once; the header has to move with the FROM line."""
+    import re as _re
+    root = _repo_root()
+    base = _re.search(r"FROM python:([0-9.]+)-slim",
+                      (root / "Dockerfile").read_text()).group(1)
+    header = (root / "server" / "requirements.lock").read_text().split("\n\n")[0]
+    assert f"python:{base}-slim" in header, (
+        f"Dockerfile is on python {base} but the lock header says otherwise — "
+        "regenerate server/requirements.lock against the new base image"
+    )

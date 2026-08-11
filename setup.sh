@@ -87,17 +87,22 @@ else
   MAIL_OUT=smtp
   [ "$TRANSPORT_CHOICE" = "2" ] && MAIL_IN=resend || MAIL_IN=imap
   ask SMTP_USER "Your email address (this becomes the approved sender)"
+  # Addresses are case-insensitive and people type them either way; matching a
+  # preset must not depend on the shift key.
+  MAIL_DOMAIN_LC=$(printf '%s' "${SMTP_USER##*@}" | tr '[:upper:]' '[:lower:]')
   echo
   # Microsoft switched personal accounts to OAuth-only on 2024-09-16, so an
   # app password cannot be issued and SMTP/IMAP sign-in fails with a bare
   # "authentication failed" that looks like a typo. Say so before they hunt.
-  case "${SMTP_USER##*@}" in
+  case "$MAIL_DOMAIN_LC" in
     outlook.com|hotmail.com|live.com|msn.com)
       echo
       echo "  Outlook.com, Hotmail, Live and MSN no longer allow app passwords —"
       echo "  Microsoft removed password sign-in for SMTP/IMAP on personal"
-      echo "  accounts in September 2024. Use a Gmail, iCloud, Fastmail or"
-      echo "  own-domain address here, or re-run and pick option 2 (Resend)."
+      echo "  accounts in September 2024. Options 1 and 2 both send over SMTP,"
+      echo "  so neither can use this address: pick a Gmail, iCloud, Fastmail"
+      echo "  or own-domain address here, or re-run and pick option 3, which"
+      echo "  sends from your own domain through Resend."
       exit 1 ;;
   esac
   echo
@@ -105,13 +110,26 @@ else
   echo "    Gmail    myaccount.google.com/apppasswords  (needs 2FA on)"
   echo "    iCloud   appleid.apple.com -> Sign-In and Security"
   ask SMTP_PASSWORD "App password"
-  # Recognise the common providers so nobody has to look up host names.
-  case "${SMTP_USER##*@}" in
-    gmail.com|googlemail.com) SMTP_HOST=smtp.gmail.com;   IMAP_HOST=imap.gmail.com ;;
-    icloud.com|me.com|mac.com) SMTP_HOST=smtp.mail.me.com; IMAP_HOST=imap.mail.me.com ;;
-    fastmail.com|fastmail.fm) SMTP_HOST=smtp.fastmail.com; IMAP_HOST=imap.fastmail.com ;;
-    yahoo.com) SMTP_HOST=smtp.mail.yahoo.com; IMAP_HOST=imap.mail.yahoo.com ;;
-    *) ask SMTP_HOST "SMTP server"; ask IMAP_HOST "IMAP server" ;;
+  # Recognise the common providers so nobody has to look up host names. The
+  # submission port is part of the preset: iCloud offers STARTTLS on 587 and
+  # not implicit TLS on 465, so a single hardcoded port cannot serve everyone.
+  case "$MAIL_DOMAIN_LC" in
+    gmail.com|googlemail.com)
+      SMTP_HOST=smtp.gmail.com;      SMTP_PORT=465; IMAP_HOST=imap.gmail.com ;;
+    icloud.com|me.com|mac.com)
+      SMTP_HOST=smtp.mail.me.com;    SMTP_PORT=587; IMAP_HOST=imap.mail.me.com ;;
+    fastmail.com|fastmail.fm)
+      SMTP_HOST=smtp.fastmail.com;   SMTP_PORT=465; IMAP_HOST=imap.fastmail.com ;;
+    yahoo.com)
+      SMTP_HOST=smtp.mail.yahoo.com; SMTP_PORT=465; IMAP_HOST=imap.mail.yahoo.com ;;
+    *)
+      echo
+      echo "  Hosted on your own domain? Use your provider's servers — for"
+      echo "  Google Workspace that is still smtp.gmail.com/imap.gmail.com,"
+      echo "  for Fastmail smtp.fastmail.com/imap.fastmail.com."
+      ask SMTP_HOST "SMTP server"
+      ask SMTP_PORT "SMTP port (465 for implicit TLS, 587 for STARTTLS)" "465"
+      ask IMAP_HOST "IMAP server" ;;
   esac
   FROM_EMAIL="${SMTP_USER}"
   RETURN_EMAIL="${SMTP_USER}"
@@ -142,7 +160,8 @@ OUTBOX_DIR=/data/outbox
 RESEND_API_KEY=${RESEND_API_KEY:-}
 RESEND_WEBHOOK_SECRET=
 SMTP_HOST=${SMTP_HOST:-}
-SMTP_PORT=465
+SMTP_PORT=${SMTP_PORT:-465}
+SMTP_SECURITY=
 SMTP_USER=${SMTP_USER:-}
 SMTP_PASSWORD=${SMTP_PASSWORD:-}
 IMAP_HOST=${IMAP_HOST:-}

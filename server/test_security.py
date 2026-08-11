@@ -607,3 +607,81 @@ def test_every_setting_the_code_reads_is_documented():
     documented = (server.parent / ".env.example").read_text()
     missing = sorted(name for name in used if name not in documented)
     assert not missing, f"undocumented settings: {missing}"
+
+
+# --- provider presets -------------------------------------------------------
+# setup.sh is the only place most people ever configure a provider, so a wrong
+# port there is indistinguishable from a broken bridge. These pin the presets
+# to what each provider actually offers.
+
+
+PROVIDER_PRESETS = [
+    ("gmail.com", "smtp.gmail.com", "465", "imap.gmail.com"),
+    ("icloud.com", "smtp.mail.me.com", "587", "imap.mail.me.com"),
+    ("fastmail.com", "smtp.fastmail.com", "465", "imap.fastmail.com"),
+    ("yahoo.com", "smtp.mail.yahoo.com", "465", "imap.mail.yahoo.com"),
+]
+
+
+def _setup_sh() -> str:
+    from pathlib import Path
+    return (Path(app.__file__).resolve().parent.parent / "setup.sh").read_text()
+
+
+@pytest.mark.parametrize("domain,smtp,port,imap", PROVIDER_PRESETS)
+def test_provider_presets_carry_host_and_port(domain, smtp, port, imap):
+    """iCloud shipped with 465 because the port was hardcoded once for
+    everyone; it only offers STARTTLS on 587, so setup produced an .env that
+    could never send."""
+    import re as _re
+    text = _setup_sh()
+    branch = _re.search(rf"^\s*{_re.escape(domain)}[|)].*?;;", text, _re.M | _re.S)
+    assert branch, f"no preset branch for {domain}"
+    body = branch.group(0)
+    assert f"SMTP_HOST={smtp}" in body
+    assert f"SMTP_PORT={port}" in body
+    assert f"IMAP_HOST={imap}" in body
+
+
+def test_setup_does_not_pin_one_port_for_every_provider():
+    assert "SMTP_PORT=${SMTP_PORT:-465}" in _setup_sh()
+
+
+def test_outlook_is_not_sent_to_a_path_that_also_uses_smtp():
+    """Options 1 and 2 both send over SMTP, so pointing an Outlook user at
+    option 2 sends them back into the same wall."""
+    import re as _re
+    text = _setup_sh()
+    branch = _re.search(r"^\s*outlook\.com[|)].*?;;", text, _re.M | _re.S).group(0)
+    assert "option 3" in branch
+    assert "option 2" not in branch or "so neither" in branch
+
+
+def test_provider_matching_is_case_insensitive():
+    """Addresses are case-insensitive; a preset must not need the shift key."""
+    assert "tr '[:upper:]' '[:lower:]'" in _setup_sh()
+
+
+@pytest.mark.parametrize(
+    "security,port,expected",
+    [("", 465, "ssl"), ("", 587, "plain"), ("ssl", 587, "ssl"),
+     ("starttls", 465, "plain")],
+)
+def test_smtp_security_overrides_the_port_guess(monkeypatch, security, port, expected):
+    calls = []
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            calls.append("plain")
+
+        def starttls(self):
+            pass
+
+    monkeypatch.setattr(app.smtplib, "SMTP", FakeSMTP)
+    monkeypatch.setattr(app.smtplib, "SMTP_SSL",
+                        lambda *a, **k: calls.append("ssl"))
+    monkeypatch.setattr(app, "SMTP_HOST", "smtp.example.com")
+    monkeypatch.setattr(app, "SMTP_PORT", port)
+    monkeypatch.setattr(app, "SMTP_SECURITY", security)
+    app.smtp_connection()
+    assert calls == [expected]

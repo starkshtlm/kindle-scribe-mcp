@@ -29,17 +29,27 @@ providers only issue app passwords once 2FA is enabled. Gmail:
 myaccount.google.com/apppasswords. iCloud: appleid.apple.com → Sign-In and
 Security.
 
-**Outlook.com, Hotmail, Live or MSN: this path does not work at all.**
+**Outlook.com, Hotmail, Live or MSN: SMTP sending does not work at all.**
 Microsoft removed password sign-in for third-party IMAP/SMTP on personal
 accounts on 2024-09-16, and app passwords went with it — the only symptom is an
 authentication failure that looks like a typo. `setup.sh` stops you here on
-purpose. Use Gmail, iCloud, Fastmail or your own domain, or take the Resend
-path.
+purpose. Note that this rules out **both** mailbox paths, since option 2 also
+sends over SMTP: use another address, or take option 3 (`MAIL_OUT=resend`),
+which sends from your own domain.
 
-**Google Workspace account: there is no app-password option.**
-Google removed app passwords for Workspace accounts, so a `you@yourcompany.com`
-Google account cannot use this path. Use a personal Gmail/iCloud/Fastmail
-address, or switch to the domain (Resend) path.
+**Google Workspace account: no app-password option appears.**
+Whether a Workspace account can issue app passwords depends on how it is
+administered — they are unavailable when an admin has turned them off, under
+Advanced Protection, and in several 2FA configurations. If the option is
+missing at myaccount.google.com/apppasswords, ask your admin, or use a personal
+Gmail/iCloud/Fastmail address, or switch to `MAIL_OUT=resend`.
+
+**iCloud times out or refuses the connection on port 465.**
+iCloud offers submission on **587 with STARTTLS** and not implicit TLS on 465.
+`setup.sh` sets this for you; an `.env` written by an older version will have
+`SMTP_PORT=465`, which cannot work. The same applies to any provider that
+offers only one of the two — `SMTP_SECURITY=ssl|starttls` overrides the
+port-based guess when a host is unusual.
 
 **A returning document is rejected with "no receiving server verified this
 sender".**

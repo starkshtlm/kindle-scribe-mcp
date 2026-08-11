@@ -100,6 +100,13 @@ else:
     # Amazon matches the approved-sender list on this address.
     FROM_EMAIL = os.environ.get("FROM_EMAIL", "").strip() or SMTP_USER
 
+# How the submission connection is encrypted. Empty means infer it from the
+# port, which is right almost always; the override exists for the hosts where
+# it is not (implicit TLS on a non-standard port, STARTTLS offered on 465).
+SMTP_SECURITY = os.environ.get("SMTP_SECURITY", "").strip().lower()
+if SMTP_SECURITY not in ("", "ssl", "starttls"):
+    raise SystemExit("SMTP_SECURITY must be 'ssl', 'starttls', or empty to infer.")
+
 # Polling can read a different mailbox than the one we send from; both default
 # to the SMTP credentials, which is the common case.
 IMAP_USER = os.environ.get("IMAP_USER", "").strip() or SMTP_USER
@@ -455,10 +462,11 @@ def smtp_connection() -> smtplib.SMTP:
     Port 465 speaks TLS from the first byte; 587 starts in the clear and
     upgrades with STARTTLS. Supporting only 465 is not a detail: hosting
     providers routinely block it (Hetzner blocks 465 and 25 outbound while
-    leaving 587 open), so sending would time out with no explanation on the
-    very machines people deploy this to.
+    leaving 587 open), and iCloud does not offer it at all, so a single mode
+    would fail on both the machines people deploy to and a major provider.
+    `SMTP_SECURITY` overrides the port-based guess.
     """
-    if SMTP_PORT == 465:
+    if SMTP_SECURITY == "ssl" or (not SMTP_SECURITY and SMTP_PORT == 465):
         return smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=120)
     smtp = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=120)
     try:

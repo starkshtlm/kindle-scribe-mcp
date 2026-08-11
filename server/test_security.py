@@ -985,3 +985,13 @@ def test_submission_mode_is_shared_by_server_and_cli(port, override, expected):
     rule lives in one module both import."""
     from mailmode import submission_mode
     assert submission_mode(port, override) == expected
+
+
+def test_the_mcp_pin_cannot_be_widened_by_a_bot():
+    """mcp 2.0 moved the module structure and mcp.server.fastmcp disappeared.
+    The <2 pin is load-bearing, so the update has to be ignored explicitly."""
+    root = _repo_root()
+    assert "mcp>=1.10,<2" in (root / "server" / "requirements.txt").read_text()
+    dependabot = (root / ".github" / "dependabot.yml").read_text()
+    assert "dependency-name: mcp" in dependabot
+    assert "version-update:semver-major" in dependabot

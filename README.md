@@ -47,10 +47,9 @@ Then two things `setup.sh` cannot do for you:
 
 1. Add your own email address to Amazon's *Approved Personal Document E-mail
    List* (amazon.com/mycd → Preferences → Personal Document Settings)
-2. Connect Claude Code:
+2. Connect your client:
    ```bash
-   claude mcp add --transport http --scope user kindle-scribe \
-     http://127.0.0.1:8377/<MCP_TOKEN>/mcp
+   ./scribe connect claude-code
    ```
 
 Ask Claude to send something to your Kindle. Write on it. Share it back by

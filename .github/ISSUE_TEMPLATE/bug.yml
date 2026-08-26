@@ -1,0 +1,51 @@
+name: Something is broken
+description: A document did not arrive, a command failed, or the bridge behaves oddly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Run `./scribe doctor` first if you can — it usually names the problem,
+        and its output is the single most useful thing in a report.
+  - type: textarea
+    id: doctor
+    attributes:
+      label: ./scribe doctor --json
+      description: Paste the output. It contains no credentials by design — check anyway before posting.
+      render: json
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected instead
+      placeholder: |
+        I shared a document from the Scribe to my own address. Twenty minutes
+        later list_annotated still says nothing new. I expected it within a
+        minute.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The tag you are running, or the commit if you build from source.
+      placeholder: v1.2.1
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: How is mail configured?
+      description: The two inbound paths fail in completely different ways.
+      options:
+        - MAIL_OUT=smtp / MAIL_IN=imap (mailbox — the quick start)
+        - MAIL_OUT=smtp / MAIL_IN=resend (hybrid)
+        - MAIL_OUT=resend / MAIL_IN=resend (own domain)
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: "`docker compose logs --tail 50`. Redact any token you find; the rest is usually the clue."
+      render: shell

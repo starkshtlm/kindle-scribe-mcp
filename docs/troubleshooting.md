@@ -110,6 +110,27 @@ document again and it arrives on the next poll.
 That is the poll interval. Lower `IMAP_POLL_SECONDS` if you want, but every
 poll is a login — a minute is a reasonable balance.
 
+**The document reaches Amazon's library but never the device.**
+Check [amazon.com/mycd](https://www.amazon.com/mycd) → Content → Docs. If the
+document is listed there, the whole mail path worked and the problem is the
+last hop, from Amazon's cloud to the device. In order:
+
+1. **Restart the Kindle** — hold the power button for about 40 seconds. This
+   fixes it surprisingly often, and it is much faster than doubting the mail
+   chain.
+2. On the device, set the library filter to **All** or **Cloud**, not
+   *Downloaded* — a delivered document can sit there waiting for a tap.
+3. Check Wi-Fi is actually connected, then sync manually.
+4. Still nothing? Upload any PDF at
+   [send-to-kindle.amazon.com](https://www.amazon.com/sendtokindle). If that
+   does not arrive either, the device is not receiving anything and needs
+   re-registering — which gives it a **new** `@kindle.com` address, so update
+   `KINDLE_EMAIL` afterwards or documents will keep landing in the library only.
+
+Note that the bridge cannot detect this: Amazon acknowledges the mail and
+reports nothing back about what happens to it afterwards, so "sent" only ever
+means "accepted by Amazon".
+
 ## Receiving through Resend (`MAIL_IN=resend`)
 
 **You cannot find your `<id>.resend.app` receiving address.**

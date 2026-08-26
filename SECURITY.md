@@ -1,11 +1,34 @@
 # Security
 
-## Reporting
+## Reporting a vulnerability
 
-Open a [GitHub issue](https://github.com/starkshtlm/kindle-scribe-mcp/issues)
-for anything you find. This is a hobby project without a paid disclosure
-process — if a finding is sensitive, say so in one line without details and we
-will agree on a private channel.
+**Please do not open a public issue.** Use GitHub's
+[private vulnerability reporting](https://github.com/starkshtlm/kindle-scribe-mcp/security/advisories/new)
+— the report is visible only to the maintainer. If that form is not available
+to you, open an issue saying only that you have a security finding and want a
+private channel, with no details in it.
+
+Useful in a report: what an attacker would have to control, the smallest
+sequence that demonstrates it, which version or commit you tested, and how you
+configured the bridge (`MAIL_OUT`/`MAIL_IN` matter — the two inbound paths have
+different exposure).
+
+**What to expect.** One maintainer, evenings and weekends. An acknowledgement
+within a few days, and an honest assessment rather than a silence. Anything
+that leaks credentials or lets a stranger place a document in someone's inbox
+gets worked on ahead of everything else; a hardening suggestion may sit longer.
+
+**Disclosure.** Please give a reasonable window before publishing — thirty days
+is more than enough for a project this size, and less is fine once a fix is
+released. Fixes ship as a normal release with the reasoning in the notes, and
+a GitHub advisory when the finding warrants one. Credit is offered by default
+and withheld on request.
+
+## Supported versions
+
+The latest release is the supported one. This is a single-maintainer project
+with no backport branches: fixes land on `main` and go out in the next tag.
+Upgrading is `SCRIBE_VERSION` and a restart, so staying current is cheap.
 
 ## Threat model
 

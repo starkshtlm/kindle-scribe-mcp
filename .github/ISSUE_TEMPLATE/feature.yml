@@ -1,0 +1,25 @@
+name: Idea or request
+description: Something that would make the round trip better
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The situation, not the solution — the best ideas here have come from someone describing their afternoon.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: Optional. A rough shape is fine.
+  - type: textarea
+    id: client
+    attributes:
+      label: Which assistant and device
+      description: |
+        Especially useful if you are reporting that a client works — or does
+        not. `docs/clients/README.md` has a column that only users can fill in:
+        whether the returned page images render well enough for the model to
+        read handwriting from them.

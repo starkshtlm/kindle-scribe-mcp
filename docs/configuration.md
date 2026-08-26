@@ -42,7 +42,7 @@ Published multi-arch (amd64 and arm64) to
 provenance, and smoke-tested by digest before the attestation is pushed.
 
 ```bash
-SCRIBE_VERSION=v1.2.1 docker compose up -d   # pin a version
+SCRIBE_VERSION=v1.2.3 docker compose up -d   # pin a version (see Releases)
 docker compose -f docker-compose.dev.yml up -d --build   # build from a checkout
 ```
 

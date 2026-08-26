@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Something is broken
+    url: https://github.com/starkshtlm/kindle-scribe-mcp/blob/main/docs/troubleshooting.md
+    about: Run ./scribe doctor first — it names the broken part, and this page explains it.
+  - name: Security finding
+    url: https://github.com/starkshtlm/kindle-scribe-mcp/security/advisories/new
+    about: Report privately. Please do not open a public issue.

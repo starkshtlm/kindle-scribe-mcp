@@ -1,6 +1,6 @@
-fastapi>=0.141.1
-uvicorn[standard]>=0.52.1
+fastapi>=0.142.2
+uvicorn[standard]>=0.54.0
 httpx>=0.28.1
 python-multipart>=0.0.32
-mcp>=1.10,<2
-markdown>=3.10.3
+mcp>=2.3.0,<3
+markdown>=3.11
